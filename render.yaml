@@ -1,0 +1,25 @@
+services
+  - type web
+    name gemini-janitor-proxy
+    runtime python
+    buildCommand pip install -r requirements.txt
+    startCommand gunicorn appapp --bind 0.0.0.0$PORT --timeout 300 --workers 1
+    envVars
+      - key PYTHON_VERSION
+        value 3.11.0
+      - key MODEL
+        value gemini-2.5-flash
+      - key TEMPERATURE
+        value 1.05
+      - key ENABLE_NSFW
+        value true
+      - key ENABLE_THINKING
+        value true
+      - key ENABLE_GOOGLE_SEARCH
+        value false
+      - key TOP_P
+        value 0.95
+      - key TOP_K
+        value 40
+      - key MAX_TOKENS
+        value 10000
