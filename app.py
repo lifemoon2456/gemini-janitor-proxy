@@ -3,28 +3,26 @@ import json
 import time
 import requests
 import traceback
-import re
 from flask import Flask, request, jsonify, Response, stream_with_context
 from flask_cors import CORS
 
 # ===================================================================
-#  Configuration — All settings are read from Environment Variables
-#  Set these in your Render Dashboard → Environment tab
+#  Configuration — OpenRouter Settings
 # ===================================================================
 
-MODEL = os.environ.get("MODEL", "gemini-2.5-flash")
+MODEL = os.environ.get("MODEL", "google/gemini-2.5-flash-exp:free")
 TEMPERATURE = float(os.environ.get("TEMPERATURE", "1.05"))
 ENABLE_NSFW = os.environ.get("ENABLE_NSFW", "true").lower() == "true"
 ENABLE_THINKING = os.environ.get("ENABLE_THINKING", "true").lower() == "true"
-ENABLE_GOOGLE_SEARCH = os.environ.get("ENABLE_GOOGLE_SEARCH", "false").lower() == "true"
 TOP_P = float(os.environ.get("TOP_P", "0.95"))
-TOP_K = int(os.environ.get("TOP_K", "40"))
 MAX_TOKENS = int(os.environ.get("MAX_TOKENS", "10000"))
 FREQUENCY_PENALTY = float(os.environ.get("FREQUENCY_PENALTY", "0"))
 PRESENCE_PENALTY = float(os.environ.get("PRESENCE_PENALTY", "0"))
 
-# Render provides the port via the PORT environment variable
 PORT = int(os.environ.get("PORT", 5000))
+
+# OpenRouter API Endpoint
+OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 
 # ===================================================================
 #  Helper Functions & Prompts
@@ -122,8 +120,6 @@ def extract_thinking_and_response(content):
             thinking_part = thinking_part.split('<think>', 1)[1]
         thinking_content = thinking_part.strip()
         final_response = content[think_end:].strip()
-        if ENABLE_THINKING:
-            print("INFO: Used lenient parsing with </think> marker")
         return thinking_content, final_response, False
 
     if response_start != -1:
@@ -131,41 +127,9 @@ def extract_thinking_and_response(content):
         if '<think>' in thinking_content:
             thinking_content = thinking_content.split('<think>', 1)[1].strip()
         final_response = content[response_start:].strip()
-        if ENABLE_THINKING:
-            print("INFO: Used lenient parsing with <response> marker only")
         return thinking_content, final_response, False
 
-    if ENABLE_THINKING:
-        print("WARNING: No thinking separation tags found, treating entire content as response")
     return None, content, False
-
-def validate_and_fix_response(content):
-    return content
-
-def get_safety_settings(model_name):
-    if not model_name:
-        return []
-    return [
-        {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
-        {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
-        {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
-        {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
-    ]
-
-def transform_janitor_to_google_ai(messages):
-    if not messages or not isinstance(messages, list):
-        return []
-    google_ai_contents = []
-    for msg in messages:
-        role = msg.get('role')
-        content = msg.get('content')
-        if role in ['user', 'assistant', 'system'] and content:
-            google_role = "user" if role == 'user' else "model"
-            google_ai_contents.append({
-                "role": google_role,
-                "parts": [{"text": content}]
-            })
-    return google_ai_contents
 
 def create_janitor_chunk(content, model_name, finish_reason=None):
     return {
@@ -194,7 +158,6 @@ class StreamingParser:
         self.response_content = ""
         self.buffer = ""
         self.all_content = ""
-        self.think_end_sent = False
 
     def process_chunk(self, chunk_content):
         self.buffer += chunk_content
@@ -259,12 +222,11 @@ def handle_proxy():
     if request.method == "GET":
         return jsonify({
             "status": "online",
-            "version": "2.0.0",
-            "info": "Google AI Studio Proxy — Render Deployment",
+            "version": "3.0.0",
+            "info": "OpenRouter Proxy for JanitorAI — Render Deployment",
             "model": MODEL,
             "nsfw_enabled": ENABLE_NSFW,
             "thinking_enabled": ENABLE_THINKING,
-            "google_search_enabled": ENABLE_GOOGLE_SEARCH,
             "parsing_mode": "lenient"
         })
 
@@ -275,7 +237,7 @@ def handle_proxy():
         json_data = request.json or {}
         is_streaming = json_data.get('stream', False)
 
-        # Extract API key
+        # Extract API key (Sent by JanitorAI)
         api_key = None
         auth_header = request.headers.get('authorization')
         if auth_header and auth_header.startswith('Bearer '):
@@ -284,16 +246,13 @@ def handle_proxy():
             api_key = request.headers.get('x-api-key')
         elif json_data.get('api_key'):
             api_key = json_data.get('api_key')
-        elif request.args.get('api_key'):
-            api_key = request.args.get('api_key')
 
         if not api_key:
             return jsonify(create_error_response(
-                "Google AI API key required. Provide it in Authorization header (Bearer YOUR_KEY), "
-                "x-api-key header, or api_key in JSON body/query params."
+                "OpenRouter API key required. Provide it in JanitorAI's API Key field."
             )), 401
 
-        # Prefill
+        # Inject Prompts
         if ENABLE_NSFW and nsfw_prefill:
             messages = json_data.get("messages", [])
             if messages and messages[-1].get("role") == "user":
@@ -316,50 +275,30 @@ def handle_proxy():
 
             json_data["messages"] = messages
 
+        # Determine Model (Priority to JanitorAI, fallback to Env Var)
         selected_model = json_data.get('model') if json_data.get('model') and json_data['model'] != "custom" else MODEL
+        json_data['model'] = selected_model
         print(f"Using model: {selected_model}")
-        print(f"Thinking mode: {'Enabled' if ENABLE_THINKING else 'Disabled'}")
 
-        google_ai_contents = transform_janitor_to_google_ai(json_data.get('messages', []))
-        if not google_ai_contents:
-            return jsonify(create_error_response("Invalid or empty message format")), 400
+        # OpenRouter uses OpenAI format, so we just pass the json_data directly
+        # But we ensure our env var settings are applied if not provided by JanitorAI
+        json_data['temperature'] = json_data.get('temperature', TEMPERATURE)
+        json_data['max_tokens'] = json_data.get('max_tokens', MAX_TOKENS)
+        json_data['top_p'] = json_data.get('top_p', TOP_P)
+        
+        if FREQUENCY_PENALTY != 0.0:
+            json_data['frequency_penalty'] = FREQUENCY_PENALTY
+        if PRESENCE_PENALTY != 0.0:
+            json_data['presence_penalty'] = PRESENCE_PENALTY
 
-        safety_settings = get_safety_settings(selected_model)
-
-        generation_config = {
-            "temperature": json_data.get('temperature', TEMPERATURE),
-            "maxOutputTokens": json_data.get('max_tokens', MAX_TOKENS),
-            "topP": json_data.get('top_p', TOP_P),
-            "topK": json_data.get('top_k', TOP_K)
+        # Prepare headers for OpenRouter
+        headers = {
+            'Authorization': f'Bearer {api_key}',
+            'Content-Type': 'application/json',
+            'HTTP-Referer': 'https://janitorai.com', # OpenRouter requires/recommends this
+            'X-Title': 'JanitorAI Proxy' # OpenRouter recommends this
         }
 
-        if json_data.get('frequency_penalty') is not None:
-            generation_config["frequencyPenalty"] = json_data.get('frequency_penalty')
-        elif FREQUENCY_PENALTY != 0.0:
-            generation_config["frequencyPenalty"] = FREQUENCY_PENALTY
-
-        if json_data.get('presence_penalty') is not None:
-            generation_config["presencePenalty"] = json_data.get('presence_penalty')
-        elif PRESENCE_PENALTY != 0.0:
-            generation_config["presencePenalty"] = PRESENCE_PENALTY
-
-        google_ai_request = {
-            "contents": google_ai_contents,
-            "safetySettings": safety_settings,
-            "generationConfig": generation_config
-        }
-
-        if ENABLE_GOOGLE_SEARCH:
-            google_ai_request["tools"] = [{"google_search": {}}]
-            print("Google Search Tool enabled for this request.")
-
-        endpoint = "streamGenerateContent" if is_streaming else "generateContent"
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/{selected_model}:{endpoint}?key={api_key}"
-
-        if is_streaming:
-            url += "&alt=sse"
-
-        headers = {'Content-Type': 'application/json'}
         timeout_seconds = 300
 
         if is_streaming:
@@ -367,12 +306,12 @@ def handle_proxy():
                 response = None
                 parser = StreamingParser()
                 try:
-                    print("Connecting to Google AI for streaming...")
+                    print("Connecting to OpenRouter for streaming...")
                     response = requests.post(
-                        url, json=google_ai_request, headers=headers,
+                        OPENROUTER_URL, json=json_data, headers=headers,
                         stream=True, timeout=timeout_seconds
                     )
-                    print(f"Google AI stream response status: {response.status_code}")
+                    print(f"OpenRouter stream response status: {response.status_code}")
                     response.raise_for_status()
 
                     has_sent_data = False
@@ -393,21 +332,19 @@ def handle_proxy():
                                 data = json.loads(data_str)
 
                                 if 'error' in data:
-                                    error_message = data['error'].get('message', 'Unknown error in stream data')
-                                    yield create_error_stream_chunk(f"Google AI Error: {error_message}")
+                                    error_message = data['error'].get('message', 'Unknown error')
+                                    yield create_error_stream_chunk(f"OpenRouter Error: {error_message}")
                                     yield 'data: [DONE]\n\n'
                                     return
 
                                 content_delta = ""
                                 finish_reason = None
 
-                                if 'candidates' in data and data['candidates']:
-                                    candidate = data['candidates'][0]
-                                    if 'content' in candidate and 'parts' in candidate['content']:
-                                        for part in candidate['content']['parts']:
-                                            if 'text' in part:
-                                                content_delta += part['text']
-                                    finish_reason = candidate.get('finishReason')
+                                if 'choices' in data and data['choices']:
+                                    choice = data['choices'][0]
+                                    if 'delta' in choice and 'content' in choice['delta']:
+                                        content_delta += choice['delta']['content']
+                                    finish_reason = choice.get('finish_reason')
 
                                 if not content_delta:
                                     continue
@@ -440,7 +377,7 @@ def handle_proxy():
                             break
 
                     if not has_sent_data:
-                        yield create_error_stream_chunk("No content received from Google AI.")
+                        yield create_error_stream_chunk("No content received from OpenRouter.")
                         yield 'data: [DONE]\n\n'
 
                 except requests.exceptions.RequestException as req_err:
@@ -464,84 +401,46 @@ def handle_proxy():
             )
 
         else:
-            print("Sending request to Google AI (non-streaming)...")
+            print("Sending request to OpenRouter (non-streaming)...")
             response = requests.post(
-                url, json=google_ai_request, headers=headers,
+                OPENROUTER_URL, json=json_data, headers=headers,
                 timeout=timeout_seconds
             )
-            print(f"Google AI non-stream response status: {response.status_code}")
+            print(f"OpenRouter non-stream response status: {response.status_code}")
 
             try:
-                google_response = response.json()
+                or_response = response.json()
             except json.JSONDecodeError:
-                google_response = None
+                or_response = None
 
             if response.status_code != 200:
-                error_msg = f"Google AI returned error code: {response.status_code}"
-                if google_response and 'error' in google_response:
-                    error_detail = google_response['error'].get('message', response.text[:200])
+                error_msg = f"OpenRouter returned error code: {response.status_code}"
+                if or_response and 'error' in or_response:
+                    error_detail = or_response['error'].get('message', response.text[:200])
                     error_msg = f"{error_msg} - {error_detail}"
-                elif not google_response:
-                    error_msg = f"{error_msg} - {response.text[:200]}"
                 return jsonify(create_error_response(error_msg)), 200
 
-            if not google_response:
-                return jsonify(create_error_response("Received OK status but couldn't parse response body.")), 200
+            if not or_response or not or_response.get('choices'):
+                return jsonify(create_error_response("No content received from OpenRouter.")), 200
 
-            if not google_response.get('candidates') or not google_response['candidates'][0].get('content'):
-                finish_reason = google_response.get('candidates', [{}])[0].get('finishReason', 'UNKNOWN')
-                prompt_feedback = google_response.get('promptFeedback')
-                filter_msg = "No content received from Google AI."
-                if finish_reason != 'STOP':
-                    filter_msg += f" Finish Reason: {finish_reason}."
-                if prompt_feedback and prompt_feedback.get('blockReason'):
-                    filter_msg += f" Block Reason: {prompt_feedback['blockReason']}."
-                return jsonify(create_error_response(filter_msg)), 200
-
-            candidate = google_response['candidates'][0]
-            content = ""
-            if 'content' in candidate and 'parts' in candidate['content']:
-                for part in candidate['content']['parts']:
-                    if 'text' in part:
-                        content += part['text']
-
-            content = validate_and_fix_response(content)
+            content = or_response['choices'][0].get('message', {}).get('content', '')
 
             if ENABLE_THINKING:
-                thinking_content, final_response, parsing_success = extract_thinking_and_response(content)
+                thinking_content, final_response, _ = extract_thinking_and_response(content)
                 if thinking_content:
                     print("\n" + "=" * 50)
                     print("THINKING PROCESS:")
                     print(thinking_content)
                     print("=" * 50)
                     content = final_response.strip()
-                else:
-                    print("WARNING: No thinking tags found in response!")
 
-            finish_reason_str = candidate.get('finishReason', 'stop')
-
-            janitor_response = {
-                "id": f"chatcmpl-{int(time.time())}",
-                "object": "chat.completion",
-                "created": int(time.time()),
-                "model": selected_model,
-                "choices": [{
-                    "index": 0,
-                    "message": {"role": "assistant", "content": content},
-                    "finish_reason": finish_reason_str
-                }],
-                "usage": google_response.get('usageMetadata', {
-                    "prompt_token_count": len(str(google_ai_contents)),
-                    "candidates_token_count": len(content),
-                    "total_token_count": len(str(google_ai_contents)) + len(content)
-                })
-            }
-            return jsonify(janitor_response)
+            or_response['choices'][0]['message']['content'] = content
+            return jsonify(or_response)
 
     except requests.exceptions.Timeout:
-        return jsonify(create_error_response("Request to Google AI timed out.")), 200
+        return jsonify(create_error_response("Request to OpenRouter timed out.")), 200
     except requests.exceptions.RequestException as e:
-        return jsonify(create_error_response(f"Error connecting to Google AI: {e}")), 200
+        return jsonify(create_error_response(f"Error connecting to OpenRouter: {e}")), 200
     except Exception as e:
         traceback.print_exc()
         return jsonify(create_error_response(f"Proxy Internal Error: {str(e)}")), 500
@@ -554,20 +453,14 @@ def health_check():
         "model_selected": MODEL,
         "nsfw_enabled": ENABLE_NSFW,
         "thinking_enabled": ENABLE_THINKING,
-        "google_search_enabled": ENABLE_GOOGLE_SEARCH,
         "parsing_mode": "lenient"
     })
 
-# ===================================================================
-#  Entry Point
-# ===================================================================
-
 if __name__ == '__main__':
     print("\n" + "=" * 60)
-    print(" Google AI Studio Proxy — Render Deployment")
-    print(f" Model: {MODEL}")
+    print(" OpenRouter Proxy for JanitorAI — Render Deployment")
+    print(f" Default Model: {MODEL}")
     print(f" Thinking Mode: {'Enabled' if ENABLE_THINKING else 'Disabled'}")
-    print(f" Google Search: {'Enabled' if ENABLE_GOOGLE_SEARCH else 'Disabled'}")
     print(f" Parsing Mode: LENIENT")
     print(f" Listening on port: {PORT}")
     print("=" * 60 + "\n")
