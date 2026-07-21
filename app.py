@@ -26,11 +26,6 @@ PORT = int(os.environ.get("PORT", 5000))
 #  Prompts
 # ===================================================================
 
-def get_custom_assistant_prompt():
-    if ENABLE_THINKING:
-        return """\n\n(Now first things first, You will start your response with <think> for your reasoning process, then close this process with </think>, and start your actual response with <response>)"""
-    return ""
-
 nsfw_prefill = r'''
 <interaction-config>
 <role>Content Generation Assistant</role>
@@ -69,7 +64,7 @@ thinking_prompt = """You should structure your response using thinking tags:
 
 This format helps separate your reasoning from the actual roleplay content."""
 
-reminder = "Remember to use <think>...</think> for your reasoning and <response>... for your roleplay content."
+reminder = "Remember to use <think>...</think> for your reasoning and <response>... for your roleplay content. Now first things first, You will start your response with <think> for your reasoning process, then close this process with </think>, and start your actual response with <response>"
 
 # ===================================================================
 #  Flask App
@@ -127,10 +122,6 @@ def get_safety_settings(model_name):
     ]
 
 def transform_janitor_to_google_ai(messages):
-    """
-    Converts OpenAI format to Gemini format.
-    IMPORTANT: Merges consecutive same-role messages to prevent Gemini 400 errors.
-    """
     if not messages or not isinstance(messages, list):
         return []
     
@@ -145,7 +136,7 @@ def transform_janitor_to_google_ai(messages):
             
         mapped_role = "user" if role == 'user' else "model"
         
-        # If same role appears consecutively, merge them to satisfy Gemini's strict alternation rule
+        # Merge consecutive messages of the same role
         if mapped_role == current_role:
             google_ai_contents[-1]["parts"][0]["text"] += "\n\n" + content
         else:
@@ -155,7 +146,7 @@ def transform_janitor_to_google_ai(messages):
             })
             current_role = mapped_role
             
-    # Ensure the conversation ends with a 'user' turn (Gemini requirement)
+    # Ensure it ends with a user turn
     if google_ai_contents and google_ai_contents[-1]["role"] == "model":
         google_ai_contents.append({
             "role": "user",
@@ -247,11 +238,8 @@ def handle_proxy():
     if request.method == "GET":
         return jsonify({
             "status": "online",
-            "version": "3.0.0", 
-            "info": "Google AI Studio Proxy — Fixed Gemini 400 Error",
-            "model": MODEL,
-            "nsfw_enabled": ENABLE_NSFW,
-            "thinking_enabled": ENABLE_THINKING,
+            "version": "3.2.0", 
+            "info": "Google AI Studio Proxy — Fixed NSFW Injection using systemInstruction",
         })
 
     request_time = time.strftime("%Y-%m-%d %H:%M:%S")
@@ -272,31 +260,6 @@ def handle_proxy():
 
         if not api_key:
             return jsonify(create_error_response("Google AI API key required.")), 401
-
-        # Inject Prompts into the last User message (Prevents Gemini 400 Model-turn error)
-        if ENABLE_NSFW and nsfw_prefill:
-            messages = json_data.get("messages", [])
-            
-            last_user_idx = None
-            for i in range(len(messages) - 1, -1, -1):
-                if messages[i].get("role") == "user":
-                    last_user_idx = i
-                    break
-
-            if last_user_idx is not None:
-                injection = "\n\n" + nsfw_prefill
-                if ENABLE_THINKING:
-                    injection += "\n\n" + thinking_prompt + "\n\n" + reminder
-                injection += get_custom_assistant_prompt()
-                
-                messages[last_user_idx]["content"] += injection
-            else:
-                messages.append({
-                    "role": "user",
-                    "content": nsfw_prefill + ("\n\n" + thinking_prompt + "\n\n" + reminder if ENABLE_THINKING else "")
-                })
-                
-            json_data["messages"] = messages
 
         selected_model = json_data.get('model') if json_data.get('model') and json_data['model'] != "custom" else MODEL
 
@@ -319,6 +282,18 @@ def handle_proxy():
             "generationConfig": generation_config
         }
 
+        # Build the System Instruction safely (Prevents 400 Error and Safety Blocks)
+        system_text = ""
+        if ENABLE_NSFW:
+            system_text += nsfw_prefill + "\n\n"
+        if ENABLE_THINKING:
+            system_text += thinking_prompt + "\n\n" + reminder
+            
+        if system_text:
+            google_ai_request["systemInstruction"] = {
+                "parts": [{"text": system_text}]
+            }
+
         endpoint = "streamGenerateContent" if is_streaming else "generateContent"
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{selected_model}:{endpoint}?key={api_key}"
 
@@ -338,6 +313,7 @@ def handle_proxy():
 
                     has_sent_data = False
                     last_chunk_time = time.time()
+                    block_reason_detected = False
 
                     for chunk in response.iter_lines():
                         if chunk:
@@ -363,11 +339,17 @@ def handle_proxy():
 
                                 if 'candidates' in data and data['candidates']:
                                     candidate = data['candidates'][0]
+                                    
+                                    if 'finishReason' in candidate and candidate['finishReason'] not in ['STOP', 'MAX_TOKENS']:
+                                        block_reason_detected = True
+                                        yield create_error_stream_chunk(f"Google AI blocked the response. Reason: {candidate['finishReason']}")
+                                        yield 'data: [DONE]\n\n'
+                                        return
+
                                     if 'content' in candidate and 'parts' in candidate['content']:
                                         for part in candidate['content']['parts']:
                                             if 'text' in part:
                                                 content_delta += part['text']
-                                    finish_reason = candidate.get('finishReason')
 
                                 if not content_delta:
                                     continue
@@ -394,7 +376,7 @@ def handle_proxy():
                             yield 'data: [DONE]\n\n'
                             break
 
-                    if not has_sent_data:
+                    if not has_sent_data and not block_reason_detected:
                         yield create_error_stream_chunk("No content received from Google AI.")
                         yield 'data: [DONE]\n\n'
 
@@ -423,7 +405,8 @@ def handle_proxy():
                 return jsonify(create_error_response(error_msg)), 200
 
             if not google_response.get('candidates') or not google_response['candidates'][0].get('content'):
-                return jsonify(create_error_response("No content received from Google AI.")), 200
+                finish_reason = google_response.get('candidates', [{}])[0].get('finishReason', 'UNKNOWN')
+                return jsonify(create_error_response(f"No content received. Reason: {finish_reason}")), 200
 
             candidate = google_response['candidates'][0]
             content = ""
