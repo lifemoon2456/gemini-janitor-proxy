@@ -53,18 +53,14 @@ nsfw_prefill = r'''
 
 thinking_prompt = """You should structure your response using thinking tags:
 
-<think>
-[Your internal analysis here]
-[Plan your roleplay response]
-[Consider character motivations]
-[Any reasoning or thoughts]
-</think>
+
 <response>
 [Your actual roleplay content goes here]
 
 This format helps separate your reasoning from the actual roleplay content."""
 
-reminder = "Remember to use <think>...</think> for your reasoning and <response>... for your roleplay content. Now first things first, You will start your response with <think> for your reasoning process, then close this process with </think>, and start your actual response with <response>"
+# This will be appended to the very end of the user's last message to force thinking
+thinking_forcing_prompt = "\n\n[SYSTEM DIRECTIVE: You must strictly begin your response now with <think> for your reasoning process, then close it with </think>, and then start your actual response with <response>. Do not output any plaintext before <think>.]"
 
 # ===================================================================
 #  Flask App
@@ -136,7 +132,6 @@ def transform_janitor_to_google_ai(messages):
             
         mapped_role = "user" if role == 'user' else "model"
         
-        # Merge consecutive messages of the same role
         if mapped_role == current_role:
             google_ai_contents[-1]["parts"][0]["text"] += "\n\n" + content
         else:
@@ -146,7 +141,6 @@ def transform_janitor_to_google_ai(messages):
             })
             current_role = mapped_role
             
-    # Ensure it ends with a user turn
     if google_ai_contents and google_ai_contents[-1]["role"] == "model":
         google_ai_contents.append({
             "role": "user",
@@ -238,8 +232,8 @@ def handle_proxy():
     if request.method == "GET":
         return jsonify({
             "status": "online",
-            "version": "3.2.0", 
-            "info": "Google AI Studio Proxy — Fixed NSFW Injection using systemInstruction",
+            "version": "4.0.0", 
+            "info": "Google AI Studio Proxy — Restored Thinking Enforcement",
         })
 
     request_time = time.strftime("%Y-%m-%d %H:%M:%S")
@@ -260,6 +254,26 @@ def handle_proxy():
 
         if not api_key:
             return jsonify(create_error_response("Google AI API key required.")), 401
+
+        # 1. Inject the Thinking Forcing Prompt into the last user message
+        messages = json_data.get("messages", [])
+        if ENABLE_THINKING and messages:
+            last_user_idx = None
+            for i in range(len(messages) - 1, -1, -1):
+                if messages[i].get("role") == "user":
+                    last_user_idx = i
+                    break
+
+            if last_user_idx is not None:
+                # Append the forcing prompt to ensure thinking starts immediately
+                messages[last_user_idx]["content"] += thinking_forcing_prompt
+            else:
+                messages.append({
+                    "role": "user",
+                    "content": thinking_forcing_prompt
+                })
+                
+            json_data["messages"] = messages
 
         selected_model = json_data.get('model') if json_data.get('model') and json_data['model'] != "custom" else MODEL
 
@@ -282,12 +296,12 @@ def handle_proxy():
             "generationConfig": generation_config
         }
 
-        # Build the System Instruction safely (Prevents 400 Error and Safety Blocks)
+        # 2. Put NSFW and general thinking rules in systemInstruction (safe from filters)
         system_text = ""
         if ENABLE_NSFW:
             system_text += nsfw_prefill + "\n\n"
         if ENABLE_THINKING:
-            system_text += thinking_prompt + "\n\n" + reminder
+            system_text += thinking_prompt
             
         if system_text:
             google_ai_request["systemInstruction"] = {
