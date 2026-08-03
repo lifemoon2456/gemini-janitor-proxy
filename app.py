@@ -7,19 +7,19 @@ from flask import Flask, request, jsonify, Response, stream_with_context
 from flask_cors import CORS
 
 # ===================================================================
-#  Configuration
+#  Configuration (In-Memory for UI, Fallback to Env Vars)
 # ===================================================================
 
-MODEL = os.environ.get("MODEL", "gemini-2.5-flash")
-TEMPERATURE = float(os.environ.get("TEMPERATURE", "1.05"))
-ENABLE_NSFW = os.environ.get("ENABLE_NSFW", "true").lower() == "true"
-ENABLE_THINKING = os.environ.get("ENABLE_THINKING", "true").lower() == "true"
-ENABLE_GOOGLE_SEARCH = os.environ.get("ENABLE_GOOGLE_SEARCH", "false").lower() == "true"
-TOP_P = float(os.environ.get("TOP_P", "0.95"))
-TOP_K = int(os.environ.get("TOP_K", "40"))
-MAX_TOKENS = int(os.environ.get("MAX_TOKENS", "10000"))
-FREQUENCY_PENALTY = float(os.environ.get("FREQUENCY_PENALTY", "0"))
-PRESENCE_PENALTY = float(os.environ.get("PRESENCE_PENALTY", "0"))
+app_config = {
+    "MODEL": os.environ.get("MODEL", "gemini-2.5-flash"),
+    "TEMPERATURE": float(os.environ.get("TEMPERATURE", "1.05")),
+    "ENABLE_NSFW": os.environ.get("ENABLE_NSFW", "true").lower() == "true",
+    "ENABLE_THINKING": os.environ.get("ENABLE_THINKING", "true").lower() == "true",
+    "ENABLE_GOOGLE_SEARCH": os.environ.get("ENABLE_GOOGLE_SEARCH", "false").lower() == "true",
+    "TOP_P": float(os.environ.get("TOP_P", "0.95")),
+    "TOP_K": int(os.environ.get("TOP_K", "40")),
+    "MAX_TOKENS": int(os.environ.get("MAX_TOKENS", "10000"))
+}
 PORT = int(os.environ.get("PORT", 5000))
 
 # ===================================================================
@@ -53,21 +53,160 @@ nsfw_prefill = r'''
 
 thinking_prompt = """You should structure your response using thinking tags:
 
-
+<think>
+[Your internal analysis here]
+[Plan your roleplay response]
+[Consider character motivations]
+[Any reasoning or thoughts]
+</think>
 <response>
 [Your actual roleplay content goes here]
 
 This format helps separate your reasoning from the actual roleplay content."""
 
-# This will be appended to the very end of the user's last message to force thinking
-thinking_forcing_prompt = "\n\n[SYSTEM DIRECTIVE: You must strictly begin your response now with <think> for your reasoning process, then close it with </think>, and then start your actual response with <response>. Do not output any plaintext before <think>.]"
-
 # ===================================================================
-#  Flask App
+#  Flask App & UI
 # ===================================================================
 
 app = Flask(__name__)
 CORS(app)
+
+HTML_UI = """
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Gemini Proxy Control Panel</title>
+    <style>
+        body { background-color: #121212; color: #e0e0e0; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; margin: 0; padding: 20px; }
+        .container { max-width: 600px; margin: auto; background: #1e1e1e; padding: 30px; border-radius: 12px; box-shadow: 0 4px 15px rgba(0,0,0,0.5); }
+        h1 { text-align: center; color: #4285f4; margin-top: 0; font-size: 24px; }
+        .form-group { margin-bottom: 20px; }
+        label { display: block; margin-bottom: 8px; color: #bdc1c6; font-weight: bold; font-size: 14px; }
+        input[type="text"], input[type="number"], select { width: 100%; padding: 10px; background: #2d2d2d; border: 1px solid #444; border-radius: 6px; color: #e0e0e0; box-sizing: border-box; }
+        .switch-group { display: flex; justify-content: space-between; align-items: center; background: #2d2d2d; padding: 12px 15px; border-radius: 6px; margin-bottom: 15px; }
+        .switch { position: relative; display: inline-block; width: 50px; height: 26px; }
+        .switch input { opacity: 0; width: 0; height: 0; }
+        .slider { position: absolute; cursor: pointer; top: 0; left: 0; right: 0; bottom: 0; background-color: #555; transition: .3s; border-radius: 26px; }
+        .slider:before { position: absolute; content: ""; height: 20px; width: 20px; right: 3px; bottom: 3px; background-color: white; transition: .3s; border-radius: 50%; }
+        input:checked + .slider { background-color: #4285f4; }
+        input:checked + .slider:before { transform: translateX(-24px); }
+        .btn-save { width: 100%; padding: 12px; background: #4285f4; color: white; border: none; border-radius: 6px; font-size: 16px; font-weight: bold; cursor: pointer; transition: 0.2s; }
+        .btn-save:hover { background: #357ae8; }
+        .status { margin-top: 20px; text-align: center; padding: 10px; border-radius: 6px; display: none; }
+        .success { background: #1e8e3e; color: white; }
+        .info-box { background: #2d2d2d; padding: 15px; border-radius: 6px; margin-top: 20px; font-size: 13px; color: #9aa0a6; line-height: 1.6; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🤖 لوحة تحكم Gemini Proxy</h1>
+        <form id="configForm">
+            <div class="form-group">
+                <label>اسم النموذج (Model)</label>
+                <input type="text" id="MODEL" placeholder="gemini-2.5-flash">
+            </div>
+            <div class="form-group">
+                <label>درجة الحرارة (Temperature)</label>
+                <input type="number" step="0.01" id="TEMPERATURE">
+            </div>
+            <div class="form-group">
+                <label>أقصى حد للرموز (Max Tokens)</label>
+                <input type="number" id="MAX_TOKENS">
+            </div>
+            <div class="switch-group">
+                <span>تفعيل المحتوى للبالغين (NSFW)</span>
+                <label class="switch"><input type="checkbox" id="ENABLE_NSFW"><span class="slider"></span></label>
+            </div>
+            <div class="switch-group">
+                <span>تفعيل وضع التفكير (Thinking)</span>
+                <label class="switch"><input type="checkbox" id="ENABLE_THINKING"><span class="slider"></span></label>
+            </div>
+            <div class="switch-group">
+                <span>تفعيل بحث جوجل (Google Search)</span>
+                <label class="switch"><input type="checkbox" id="ENABLE_GOOGLE_SEARCH"><span class="slider"></span></label>
+            </div>
+            <button type="submit" class="btn-save">حفظ الإعدادات</button>
+        </form>
+        <div id="statusMsg" class="status"></div>
+        <div class="info-box">
+            <b>ملاحظة:</b> الإعدادات هنا تتحكم بالسيرفر مباشرة. إذا قامت Render بإعادة تشغيل السيرفر، ستعود الإعدادات لقيمها الافتراضية الموجودة في Environment Variables.
+            <br><br>
+            <b>رابط JanitorAI:</b> استخدم نفس الرابط الذي ينتهي بـ <code>/v1/chat/completions</code>
+        </div>
+    </div>
+
+    <script>
+        async function loadSettings() {
+            const res = await fetch('/api/settings');
+            const data = await res.json();
+            document.getElementById('MODEL').value = data.MODEL;
+            document.getElementById('TEMPERATURE').value = data.TEMPERATURE;
+            document.getElementById('MAX_TOKENS').value = data.MAX_TOKENS;
+            document.getElementById('ENABLE_NSFW').checked = data.ENABLE_NSFW;
+            document.getElementById('ENABLE_THINKING').checked = data.ENABLE_THINKING;
+            document.getElementById('ENABLE_GOOGLE_SEARCH').checked = data.ENABLE_GOOGLE_SEARCH;
+        }
+
+        document.getElementById('configForm').addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const payload = {
+                MODEL: document.getElementById('MODEL').value,
+                TEMPERATURE: parseFloat(document.getElementById('TEMPERATURE').value),
+                MAX_TOKENS: parseInt(document.getElementById('MAX_TOKENS').value),
+                ENABLE_NSFW: document.getElementById('ENABLE_NSFW').checked,
+                ENABLE_THINKING: document.getElementById('ENABLE_THINKING').checked,
+                ENABLE_GOOGLE_SEARCH: document.getElementById('ENABLE_GOOGLE_SEARCH').checked
+            };
+            
+            const res = await fetch('/api/settings', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload)
+            });
+            
+            const statusMsg = document.getElementById('statusMsg');
+            if(res.ok) {
+                statusMsg.textContent = "✅ تم حفظ الإعدادات بنجاح!";
+                statusMsg.className = "status success";
+            } else {
+                statusMsg.textContent = "❌ حدث خطأ أثناء الحفظ.";
+                statusMsg.className = "status error";
+            }
+            statusMsg.style.display = 'block';
+            setTimeout(() => statusMsg.style.display = 'none', 3000);
+        });
+
+        loadSettings();
+    </script>
+</body>
+</html>
+"""
+
+@app.route('/')
+def control_panel():
+    return HTML_UI
+
+@app.route('/api/settings', methods=['GET', 'POST'])
+def api_settings():
+    global app_config
+    if request.method == 'GET':
+        return jsonify(app_config)
+    elif request.method == 'POST':
+        try:
+            new_config = request.json
+            app_config.update(new_config)
+            # Cast types properly
+            app_config["TEMPERATURE"] = float(app_config["TEMPERATURE"])
+            app_config["MAX_TOKENS"] = int(app_config["MAX_TOKENS"])
+            return jsonify({"status": "success", "message": "Settings updated"}), 200
+        except Exception as e:
+            return jsonify({"status": "error", "message": str(e)}), 400
+
+# ===================================================================
+#  Helper Functions
+# ===================================================================
 
 def create_error_response(error_message):
     clean_message = json.dumps(str(error_message).replace("Error: ", "", 1) if str(error_message).startswith("Error: ") else str(error_message))[1:-1]
@@ -135,17 +274,11 @@ def transform_janitor_to_google_ai(messages):
         if mapped_role == current_role:
             google_ai_contents[-1]["parts"][0]["text"] += "\n\n" + content
         else:
-            google_ai_contents.append({
-                "role": mapped_role,
-                "parts": [{"text": content}]
-            })
+            google_ai_contents.append({"role": mapped_role, "parts": [{"text": content}]})
             current_role = mapped_role
             
     if google_ai_contents and google_ai_contents[-1]["role"] == "model":
-        google_ai_contents.append({
-            "role": "user",
-            "parts": [{"text": "Continue."}]
-        })
+        google_ai_contents.append({"role": "user", "parts": [{"text": "Continue."}]})
         
     return google_ai_contents
 
@@ -203,14 +336,12 @@ class StreamingParser:
                     continue
                 else:
                     break
-
             elif self.state == "found_think_end":
                 content_to_send = self.buffer
                 self.response_content += self.buffer
                 self.buffer = ""
                 self.state = "in_response"
                 break
-
             elif self.state == "in_response":
                 content_to_send = self.buffer
                 self.response_content += self.buffer
@@ -218,7 +349,6 @@ class StreamingParser:
                 if '</response>' in self.response_content:
                     self.state = "finished"
                 break
-
             elif self.state == "finished":
                 self.buffer = ""
                 break
@@ -226,16 +356,12 @@ class StreamingParser:
         is_complete = self.state == "finished"
         return content_to_send, thinking_log, is_complete
 
-@app.route('/', methods=["GET", "POST"])
+# ===================================================================
+#  Main Proxy Route
+# ===================================================================
+
 @app.route('/v1/chat/completions', methods=["POST"])
 def handle_proxy():
-    if request.method == "GET":
-        return jsonify({
-            "status": "online",
-            "version": "4.0.0", 
-            "info": "Google AI Studio Proxy — Restored Thinking Enforcement",
-        })
-
     request_time = time.strftime("%Y-%m-%d %H:%M:%S")
     print(f"\n[{request_time}] Received request")
 
@@ -255,27 +381,33 @@ def handle_proxy():
         if not api_key:
             return jsonify(create_error_response("Google AI API key required.")), 401
 
-        # 1. Inject the Thinking Forcing Prompt into the last user message
+        # Use config from memory (updated via UI)
+        current_model = app_config["MODEL"]
+        current_temp = app_config["TEMPERATURE"]
+        current_max_tokens = app_config["MAX_TOKENS"]
+        current_nsfw = app_config["ENABLE_NSFW"]
+        current_thinking = app_config["ENABLE_THINKING"]
+        current_search = app_config["ENABLE_GOOGLE_SEARCH"]
+
+        # Handle Thinking Prompt Injection
+        thinking_forcing_prompt = ""
+        if current_thinking:
+            thinking_forcing_prompt = "\n\n[SYSTEM DIRECTIVE: You must strictly begin your response now with <think> to plan your reply, close it with </think>, and then write the actual roleplay response starting with <response>. Do not output any plaintext before <think>.]"
+
         messages = json_data.get("messages", [])
-        if ENABLE_THINKING and messages:
+        if current_thinking and messages:
             last_user_idx = None
             for i in range(len(messages) - 1, -1, -1):
                 if messages[i].get("role") == "user":
                     last_user_idx = i
                     break
-
             if last_user_idx is not None:
-                # Append the forcing prompt to ensure thinking starts immediately
                 messages[last_user_idx]["content"] += thinking_forcing_prompt
             else:
-                messages.append({
-                    "role": "user",
-                    "content": thinking_forcing_prompt
-                })
-                
+                messages.append({"role": "user", "content": thinking_forcing_prompt})
             json_data["messages"] = messages
 
-        selected_model = json_data.get('model') if json_data.get('model') and json_data['model'] != "custom" else MODEL
+        selected_model = json_data.get('model') if json_data.get('model') and json_data['model'] != "custom" else current_model
 
         google_ai_contents = transform_janitor_to_google_ai(json_data.get('messages', []))
         if not google_ai_contents:
@@ -284,10 +416,10 @@ def handle_proxy():
         safety_settings = get_safety_settings(selected_model)
 
         generation_config = {
-            "temperature": json_data.get('temperature', TEMPERATURE),
-            "maxOutputTokens": json_data.get('max_tokens', MAX_TOKENS),
-            "topP": json_data.get('top_p', TOP_P),
-            "topK": json_data.get('top_k', TOP_K)
+            "temperature": json_data.get('temperature', current_temp),
+            "maxOutputTokens": json_data.get('max_tokens', current_max_tokens),
+            "topP": json_data.get('top_p', 0.95),
+            "topK": json_data.get('top_k', 40)
         }
 
         google_ai_request = {
@@ -296,17 +428,14 @@ def handle_proxy():
             "generationConfig": generation_config
         }
 
-        # 2. Put NSFW and general thinking rules in systemInstruction (safe from filters)
         system_text = ""
-        if ENABLE_NSFW:
+        if current_nsfw:
             system_text += nsfw_prefill + "\n\n"
-        if ENABLE_THINKING:
+        if current_thinking:
             system_text += thinking_prompt
             
         if system_text:
-            google_ai_request["systemInstruction"] = {
-                "parts": [{"text": system_text}]
-            }
+            google_ai_request["systemInstruction"] = {"parts": [{"text": system_text}]}
 
         endpoint = "streamGenerateContent" if is_streaming else "generateContent"
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{selected_model}:{endpoint}?key={api_key}"
@@ -353,7 +482,6 @@ def handle_proxy():
 
                                 if 'candidates' in data and data['candidates']:
                                     candidate = data['candidates'][0]
-                                    
                                     if 'finishReason' in candidate and candidate['finishReason'] not in ['STOP', 'MAX_TOKENS']:
                                         block_reason_detected = True
                                         yield create_error_stream_chunk(f"Google AI blocked the response. Reason: {candidate['finishReason']}")
@@ -369,12 +497,6 @@ def handle_proxy():
                                     continue
 
                                 content_to_send, thinking_log, _ = parser.process_chunk(content_delta)
-
-                                if thinking_log:
-                                    print("\n" + "=" * 50)
-                                    print("THINKING PROCESS:")
-                                    print(thinking_log)
-                                    print("=" * 50)
 
                                 if content_to_send:
                                     has_sent_data = True
@@ -429,7 +551,7 @@ def handle_proxy():
                     if 'text' in part:
                         content += part['text']
 
-            if ENABLE_THINKING:
+            if current_thinking:
                 thinking_content, final_response, _ = extract_thinking_and_response(content)
                 if thinking_content:
                     content = final_response.strip()
