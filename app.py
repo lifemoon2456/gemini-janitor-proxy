@@ -3,11 +3,12 @@ import json
 import time
 import requests
 import traceback
+import re
 from flask import Flask, request, jsonify, Response, stream_with_context
 from flask_cors import CORS
 
 # ===================================================================
-#  Default Prompts (Used as initial values for the UI)
+#  Default Prompts (Used for both modes)
 # ===================================================================
 
 nsfw_prefill = r'''<interaction-config>
@@ -47,6 +48,13 @@ thinking_prompt = """You should structure your response using thinking tags:
 
 This format helps separate your reasoning from the actual roleplay content."""
 
+reminder = "Remember to use <think>...</think> for your reasoning and <response>... for your roleplay content."
+
+# Used ONLY in Classic Mode
+def get_custom_assistant_prompt():
+    return """Alright, let's start with the thinking. I'll close it once I'm done. <think>"""
+
+# Used in Safe Mode
 DEFAULT_SYSTEM_INSTRUCTION = nsfw_prefill + "\n\n" + thinking_prompt
 
 # ===================================================================
@@ -57,8 +65,10 @@ app_config = {
     "MODEL": os.environ.get("MODEL", "gemini-2.5-flash"),
     "TEMPERATURE": float(os.environ.get("TEMPERATURE", "1.05")),
     "MAX_TOKENS": int(os.environ.get("MAX_TOKENS", "10000")),
-    "ENABLE_THINKING_INJECTION": os.environ.get("ENABLE_THINKING", "true").lower() == "true",
+    "ENABLE_NSFW": os.environ.get("ENABLE_NSFW", "true").lower() == "true",
+    "ENABLE_THINKING": os.environ.get("ENABLE_THINKING", "true").lower() == "true",
     "ENABLE_GOOGLE_SEARCH": os.environ.get("ENABLE_GOOGLE_SEARCH", "false").lower() == "true",
+    "USE_CLASSIC_MODE": os.environ.get("USE_CLASSIC_MODE", "false").lower() == "true",
     "SYSTEM_INSTRUCTION": os.environ.get("SYSTEM_INSTRUCTION", DEFAULT_SYSTEM_INSTRUCTION)
 }
 PORT = int(os.environ.get("PORT", 5000))
@@ -84,7 +94,7 @@ HTML_UI = """
         .form-group { margin-bottom: 20px; }
         label { display: block; margin-bottom: 8px; color: #bdc1c6; font-weight: bold; font-size: 14px; }
         input[type="text"], input[type="number"], textarea { width: 100%; padding: 10px; background: #2d2d2d; border: 1px solid #444; border-radius: 6px; color: #e0e0e0; box-sizing: border-box; }
-        textarea { font-family: 'Courier New', Courier, monospace; min-height: 300px; resize: vertical; line-height: 1.4; }
+        textarea { font-family: 'Courier New', Courier, monospace; min-height: 200px; resize: vertical; line-height: 1.4; }
         .switch-group { display: flex; justify-content: space-between; align-items: center; background: #2d2d2d; padding: 12px 15px; border-radius: 6px; margin-bottom: 15px; }
         .switch { position: relative; display: inline-block; width: 50px; height: 26px; }
         .switch input { opacity: 0; width: 0; height: 0; }
@@ -98,6 +108,7 @@ HTML_UI = """
         .success { background: #1e8e3e; color: white; }
         .error { background: #d93025; color: white; }
         .info-box { background: #2d2d2d; padding: 15px; border-radius: 6px; margin-top: 20px; font-size: 13px; color: #9aa0a6; line-height: 1.6; }
+        .warning-box { background: #3b2f1e; border: 1px solid #ff9800; padding: 15px; border-radius: 6px; margin-top: 20px; font-size: 13px; color: #ffcc80; line-height: 1.6; }
     </style>
 </head>
 <body>
@@ -120,14 +131,23 @@ HTML_UI = """
                 </div>
             </div>
 
-            <div class="form-group">
-                <label>تعليمات النظام (System Instruction)</label>
-                <textarea id="SYSTEM_INSTRUCTION" placeholder="اكتب أو عدل التعليمات هنا... يمكنك حذف أو إضافة أي قواعد تريدها."></textarea>
+            <div class="switch-group" style="background: #3b1e1e; border: 1px solid #d93025;">
+                <span>🔴 استخدام الوضع الكلاسيكي (Classic Mode) - قد يسبب خطأ 400</span>
+                <label class="switch"><input type="checkbox" id="USE_CLASSIC_MODE"><span class="slider"></span></label>
+            </div>
+            
+            <div class="form-group" id="safe-mode-only">
+                <label>تعليمات النظام (System Instruction) - يعمل في الوضع الآمن فقط</label>
+                <textarea id="SYSTEM_INSTRUCTION" placeholder="اكتب أو عدل التعليمات هنا..."></textarea>
             </div>
 
             <div class="switch-group">
-                <span>تفعيل حقن وسم التفكير (Inject &lt;think&gt; tag)</span>
-                <label class="switch"><input type="checkbox" id="ENABLE_THINKING_INJECTION"><span class="slider"></span></label>
+                <span>تفعيل المحتوى للبالغين (NSFW)</span>
+                <label class="switch"><input type="checkbox" id="ENABLE_NSFW"><span class="slider"></span></label>
+            </div>
+            <div class="switch-group">
+                <span>تفعيل وضع التفكير (Thinking)</span>
+                <label class="switch"><input type="checkbox" id="ENABLE_THINKING"><span class="slider"></span></label>
             </div>
             <div class="switch-group">
                 <span>تفعيل بحث جوجل (Google Search)</span>
@@ -137,6 +157,9 @@ HTML_UI = """
             <button type="submit" class="btn-save">حفظ الإعدادات</button>
         </form>
         <div id="statusMsg" class="status"></div>
+        <div class="warning-box">
+            <b>تنبيه بخصوص الوضع الكلاسيكي:</b> إذا قمت بتشغيله، سيتجاهل النظام مربع التعليمات بالأعلى وسيستخدم طريقة الحقن القديمة (إضافة رسائل Assistant). هذه الطريقة قد تُفعل التفكير بشكل أقوى، لكنها قد تُظهر خطأ 400 في النماذج الجديدة.
+        </div>
         <div class="info-box">
             <b>ملاحظة:</b> التعديلات هنا تُحفظ في ذاكرة السيرفر المؤقتة. إذا قامت Render بإعادة تشغيل السيرفر، ستعود الإعدادات لقيمها الافتراضية. 
             <br><br>
@@ -152,8 +175,10 @@ HTML_UI = """
             document.getElementById('TEMPERATURE').value = data.TEMPERATURE;
             document.getElementById('MAX_TOKENS').value = data.MAX_TOKENS;
             document.getElementById('SYSTEM_INSTRUCTION').value = data.SYSTEM_INSTRUCTION;
-            document.getElementById('ENABLE_THINKING_INJECTION').checked = data.ENABLE_THINKING_INJECTION;
+            document.getElementById('ENABLE_NSFW').checked = data.ENABLE_NSFW;
+            document.getElementById('ENABLE_THINKING').checked = data.ENABLE_THINKING;
             document.getElementById('ENABLE_GOOGLE_SEARCH').checked = data.ENABLE_GOOGLE_SEARCH;
+            document.getElementById('USE_CLASSIC_MODE').checked = data.USE_CLASSIC_MODE;
         }
 
         document.getElementById('configForm').addEventListener('submit', async (e) => {
@@ -163,8 +188,10 @@ HTML_UI = """
                 TEMPERATURE: parseFloat(document.getElementById('TEMPERATURE').value),
                 MAX_TOKENS: parseInt(document.getElementById('MAX_TOKENS').value),
                 SYSTEM_INSTRUCTION: document.getElementById('SYSTEM_INSTRUCTION').value,
-                ENABLE_THINKING_INJECTION: document.getElementById('ENABLE_THINKING_INJECTION').checked,
-                ENABLE_GOOGLE_SEARCH: document.getElementById('ENABLE_GOOGLE_SEARCH').checked
+                ENABLE_NSFW: document.getElementById('ENABLE_NSFW').checked,
+                ENABLE_THINKING: document.getElementById('ENABLE_THINKING').checked,
+                ENABLE_GOOGLE_SEARCH: document.getElementById('ENABLE_GOOGLE_SEARCH').checked,
+                USE_CLASSIC_MODE: document.getElementById('USE_CLASSIC_MODE').checked
             };
             
             const res = await fetch('/api/settings', {
@@ -233,7 +260,7 @@ def get_safety_settings(model_name):
         {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
     ]
 
-def transform_janitor_to_google_ai(messages):
+def transform_janitor_to_google_ai(messages, allow_model_end=False):
     if not messages or not isinstance(messages, list):
         return []
     
@@ -254,7 +281,8 @@ def transform_janitor_to_google_ai(messages):
             google_ai_contents.append({"role": mapped_role, "parts": [{"text": content}]})
             current_role = mapped_role
             
-    if google_ai_contents and google_ai_contents[-1]["role"] == "model":
+    # Only append "Continue." if NOT in classic mode
+    if not allow_model_end and google_ai_contents and google_ai_contents[-1]["role"] == "model":
         google_ai_contents.append({"role": "user", "parts": [{"text": "Continue."}]})
         
     return google_ai_contents
@@ -362,54 +390,96 @@ def handle_proxy():
         current_model = app_config["MODEL"]
         current_temp = app_config["TEMPERATURE"]
         current_max_tokens = app_config["MAX_TOKENS"]
+        current_nsfw = app_config["ENABLE_NSFW"]
+        current_thinking = app_config["ENABLE_THINKING"]
         current_search = app_config["ENABLE_GOOGLE_SEARCH"]
-        current_thinking_injection = app_config["ENABLE_THINKING_INJECTION"]
+        use_classic = app_config["USE_CLASSIC_MODE"]
         current_system_instruction = app_config["SYSTEM_INSTRUCTION"]
 
-        # Inject the Thinking Forcing Prompt if enabled
-        thinking_forcing_prompt = ""
-        if current_thinking_injection:
-            thinking_forcing_prompt = "\n\n[SYSTEM DIRECTIVE: You must strictly begin your response now with <think> to plan your reply, close it with </think>, and then write the actual roleplay response starting with <response>. Do not output any plaintext before <think>.]"
-
         messages = json_data.get("messages", [])
-        if current_thinking_injection and messages:
-            last_user_idx = None
-            for i in range(len(messages) - 1, -1, -1):
-                if messages[i].get("role") == "user":
-                    last_user_idx = i
-                    break
-            if last_user_idx is not None:
-                messages[last_user_idx]["content"] += thinking_forcing_prompt
-            else:
-                messages.append({"role": "user", "content": thinking_forcing_prompt})
+
+        # ==========================================================
+        #  BRANCHING: Classic Mode vs Safe Mode
+        # ==========================================================
+
+        if use_classic:
+            print(">> Using CLASSIC MODE for prompt injection")
+            # Classic Mode: Append to messages array directly
+            if current_nsfw and nsfw_prefill:
+                if messages and messages[-1].get("role") == "user":
+                    messages.append({"content": nsfw_prefill, "role": "system"})
+                    if current_thinking:
+                        messages.append({"content": thinking_prompt, "role": "system"})
+                        messages.append({"content": reminder, "role": "system"})
+                    messages.append({"content": get_custom_assistant_prompt(), "role": "assistant"})
+
+                elif messages and messages[-1].get("role") == "assistant":
+                    existing_content = messages[-1].get("content", "")
+                    last_assistant = messages.pop()
+                    messages.append({"content": nsfw_prefill, "role": "system"})
+                    if current_thinking:
+                        messages.append({"content": thinking_prompt, "role": "system"})
+                        messages.append({"content": reminder, "role": "system"})
+                    if existing_content.strip() and existing_content.strip() != nsfw_prefill.strip():
+                        messages.append(last_assistant)
+                    messages.append({"content": get_custom_assistant_prompt(), "role": "assistant"})
+
             json_data["messages"] = messages
+            
+            # allow_model_end=True so it doesn't append "Continue." which would break the classic assistant prefill
+            google_ai_contents = transform_janitor_to_google_ai(messages, allow_model_end=True)
+            
+            google_ai_request = {
+                "contents": google_ai_contents,
+                "safetySettings": get_safety_settings(current_model),
+                "generationConfig": {
+                    "temperature": json_data.get('temperature', current_temp),
+                    "maxOutputTokens": json_data.get('max_tokens', current_max_tokens),
+                    "topP": 0.95,
+                    "topK": 40
+                }
+            }
+
+        else:
+            print(">> Using SAFE MODE (systemInstruction)")
+            # Safe Mode: Inject directive into user message and use systemInstruction
+            if current_thinking and messages:
+                thinking_forcing_prompt = "\n\n[SYSTEM DIRECTIVE: You must strictly begin your response now with <think> to plan your reply, close it with </think>, and then write the actual roleplay response starting with <response>. Do not output any plaintext before <think>.]"
+                last_user_idx = None
+                for i in range(len(messages) - 1, -1, -1):
+                    if messages[i].get("role") == "user":
+                        last_user_idx = i
+                        break
+                if last_user_idx is not None:
+                    messages[last_user_idx]["content"] += thinking_forcing_prompt
+                else:
+                    messages.append({"role": "user", "content": thinking_forcing_prompt})
+                json_data["messages"] = messages
+
+            google_ai_contents = transform_janitor_to_google_ai(messages, allow_model_end=False)
+            
+            google_ai_request = {
+                "contents": google_ai_contents,
+                "safetySettings": get_safety_settings(current_model),
+                "generationConfig": {
+                    "temperature": json_data.get('temperature', current_temp),
+                    "maxOutputTokens": json_data.get('max_tokens', current_max_tokens),
+                    "topP": 0.95,
+                    "topK": 40
+                }
+            }
+
+            if current_system_instruction and current_system_instruction.strip():
+                google_ai_request["systemInstruction"] = {"parts": [{"text": current_system_instruction}]}
+
+        # ==========================================================
+        #  Request Execution (Same for both modes)
+        # ==========================================================
 
         selected_model = json_data.get('model') if json_data.get('model') and json_data['model'] != "custom" else current_model
 
-        google_ai_contents = transform_janitor_to_google_ai(json_data.get('messages', []))
-        if not google_ai_contents:
-            return jsonify(create_error_response("Invalid or empty message format")), 400
-
-        safety_settings = get_safety_settings(selected_model)
-
-        generation_config = {
-            "temperature": json_data.get('temperature', current_temp),
-            "maxOutputTokens": json_data.get('max_tokens', current_max_tokens),
-            "topP": json_data.get('top_p', 0.95),
-            "topK": json_data.get('top_k', 40)
-        }
-
-        google_ai_request = {
-            "contents": google_ai_contents,
-            "safetySettings": safety_settings,
-            "generationConfig": generation_config
-        }
-
-        # Use the Custom System Instruction from the UI
-        if current_system_instruction and current_system_instruction.strip():
-            google_ai_request["systemInstruction"] = {
-                "parts": [{"text": current_system_instruction}]
-            }
+        if current_search:
+            google_ai_request["tools"] = [{"google_search": {}}]
 
         endpoint = "streamGenerateContent" if is_streaming else "generateContent"
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{selected_model}:{endpoint}?key={api_key}"
@@ -525,8 +595,7 @@ def handle_proxy():
                     if 'text' in part:
                         content += part['text']
 
-            if current_thinking_injection:
-                # Extract and clean thinking tags if present
+            if current_thinking:
                 think_end = content.find('</think>')
                 if think_end != -1:
                     content = content[think_end:].strip()
