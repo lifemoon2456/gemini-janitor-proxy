@@ -160,8 +160,6 @@ class StreamingParser:
                         thinking_part = thinking_part.split('<think>', 1)[1]
                     self.thinking_content = thinking_part.strip()
                     thinking_log = self.thinking_content
-                    
-                    # Clean the tag, only keep what's after it
                     self.buffer = parts[1]
                     self.state = "found_think_end"
                     continue
@@ -172,30 +170,42 @@ class StreamingParser:
                         thinking_part = thinking_part.split('<think>', 1)[1]
                     self.thinking_content = thinking_part.strip()
                     thinking_log = self.thinking_content
-                    
-                    # Clean the tag, only keep what's after it
                     self.buffer = parts[1]
                     self.state = "in_response"
                     continue
                 else:
+                    # SMART FALLBACK: If we have accumulated text and it doesn't start with <think>, 
+                    # the model ignored the thinking directive. Send it as normal response immediately!
+                    stripped_content = self.all_content.lstrip()
+                    if stripped_content and not stripped_content.startswith('<think') and not stripped_content.startswith('<resp'):
+                        content_to_send = self.buffer
+                        self.response_content += self.buffer
+                        self.buffer = ""
+                        self.state = "in_response"
+                        break
+                    
+                    # If it starts with < but isn't a think/response tag (e.g., markdown), send it too
+                    if stripped_content.startswith('<') and not stripped_content.startswith('<think') and not stripped_content.startswith('<resp'):
+                        content_to_send = self.buffer
+                        self.response_content += self.buffer
+                        self.buffer = ""
+                        self.state = "in_response"
+                        break
+                        
                     break
             elif self.state == "found_think_end":
-                # If <response> tag appears, strip it
                 if '<response>' in self.buffer:
                     self.buffer = self.buffer.replace('<response>', '', 1)
                     self.state = "in_response"
                     continue
-                
                 content_to_send = self.buffer
                 self.response_content += self.buffer
                 self.buffer = ""
                 break
             elif self.state == "in_response":
                 content_to_send = self.buffer
-                # Remove </response> if it appears
                 if '</response>' in content_to_send:
                     content_to_send = content_to_send.replace('</response>', '')
-                
                 self.response_content += content_to_send
                 self.buffer = ""
                 if '</response>' in self.response_content:
@@ -456,7 +466,6 @@ def handle_proxy():
                     if 'text' in part:
                         content += part['text']
 
-            # Clean up tags in non-streaming responses
             if current_thinking:
                 think_end = content.find('</think>')
                 response_start = content.find('<response>')
