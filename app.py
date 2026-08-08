@@ -44,7 +44,7 @@ thinking_prompt = """You should structure your response using thinking tags:
 
 This format helps separate your reasoning from the actual roleplay content."""
 
-reminder = "Remember to use <think>...</think> for your reasoning and <response>... for your roleplay content."
+reminder = "Remember to use  for your reasoning and <response>... for your roleplay content."
 
 def get_custom_assistant_prompt():
     return """Alright, let's start with the thinking. I'll close it once I'm done. <think>"""
@@ -105,6 +105,418 @@ def get_safety_settings(model_name):
         {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
     ]
 
+def transform_janitor_to_google_ai(messages, allow_model_end=False):
+    if not messages or not isinstance(messages, list):
+        return []
+    
+    google_ai_contents = []
+    current_role = None
+    
+    for msg in messages:
+        role = msg.get('role')
+        content = msg.get('content')
+        if not content:
+            continue
+            
+        mapped_role = "user" if role == 'user' else "model"
+        
+        if mapped_role == current_role:
+            google_ai_contents[-1]["parts"][0]["text"] += "\n\n" + content
+        else:
+            google_ai_contents.append({"role": mapped_role, "parts": [{"text": content}]})
+            current_role = mapped_role
+            
+    if not allow_model_end and google_ai_contents and google_ai_contents[-1]["role"] == "model":
+        google_ai_contents.append({"role": "user", "parts": [{"text": "Continue."}]})
+        
+    return google_ai_contents
+
+def create_janitor_chunk(content, model_name, finish_reason=None):
+    return {
+        "id": f"chatcmpl-stream-{int(time.time())}",
+        "object": "chat.completion.chunk",
+        "created": int(time.time()),
+        "model": model_name,
+        "choices": [{
+            "index": 0,
+            "delta": {"content": content},
+            "finish_reason": finish_reason if finish_reason and finish_reason != "STOP" else None
+        }]
+    }
+
+class StreamingParser:
+    def __init__(self):
+        self.reset()
+
+    def reset(self):
+        self.state = "searching"
+        self.thinking_content = ""
+        self.response_content = ""
+        self.buffer = ""
+        self.all_content = ""
+
+    def process_chunk(self, chunk_content):
+        self.buffer += chunk_content
+        self.all_content += chunk_content
+        content_to_send = ""
+        thinking_log = ""
+
+        while True:
+            if self.state == "searching":
+                if '</think>' in self.buffer:
+                    parts = self.buffer.split('</think>', 1)
+                    thinking_part = self.all_content[:self.all_content.find('</think>')]
+                    if '<think>' in thinking_part:
+                        thinking_part = thinking_part.split('<think>', 1)[1]
+                    self.thinking_content = thinking_part.strip()
+                    thinking_log = self.thinking_content
+                    self.buffer = parts[1]
+                    self.state = "found_think_end"
+                    continue
+                elif '<response>' in self.buffer:
+                    parts = self.buffer.split('<response>', 1)
+                    thinking_part = self.all_content[:self.all_content.find('<response>')]
+                    if '<think>' in thinking_part:
+                        thinking_part = thinking_part.split('<think>', 1)[1]
+                    self.thinking_content = thinking_part.strip()
+                    thinking_log = self.thinking_content
+                    self.buffer = parts[1]
+                    self.state = "in_response"
+                    continue
+                else:
+                    stripped_content = self.all_content.lstrip()
+                    if stripped_content and not stripped_content.startswith('<think') and not stripped_content.startswith('<resp'):
+                        content_to_send = self.buffer
+                        self.response_content += self.buffer
+                        self.buffer = ""
+                        self.state = "in_response"
+                        break
+                    if stripped_content.startswith('<') and not stripped_content.startswith('<think') and not stripped_content.startswith('<resp'):
+                        content_to_send = self.buffer
+                        self.response_content += self.buffer
+                        self.buffer = ""
+                        self.state = "in_response"
+                        break
+                    break
+            elif self.state == "found_think_end":
+                if '<response>' in self.buffer:
+                    self.buffer = self.buffer.replace('<response>', '', 1)
+                    self.state = "in_response"
+                    continue
+                content_to_send = self.buffer
+                self.response_content += self.buffer
+                self.buffer = ""
+                break
+            elif self.state == "in_response":
+                content_to_send = self.buffer
+                if '</response>' in content_to_send:
+                    content_to_send = content_to_send.replace('</response>', '')
+                self.response_content += content_to_send
+                self.buffer = ""
+                if '</response>' in self.response_content:
+                    self.state = "finished"
+                break
+            elif self.state == "finished":
+                self.buffer = ""
+                break
+
+        is_complete = self.state == "finished"
+        return content_to_send, thinking_log, is_complete
+
+# ===================================================================
+#  Routes
+# ===================================================================
+
+@app.route('/api/settings', methods=['GET', 'POST'])
+def api_settings():
+    global app_config
+    if request.method == 'GET':
+        return jsonify(app_config)
+    elif request.method == 'POST':
+        try:
+            new_config = request.json
+            app_config.update(new_config)
+            app_config["TEMPERATURE"] = float(app_config["TEMPERATURE"])
+            app_config["MAX_TOKENS"] = int(app_config["MAX_TOKENS"])
+            return jsonify({"status": "success", "message": "Settings updated"}), 200
+        except Exception as e:
+            return jsonify({"status": "error", "message": str(e)}), 400
+
+@app.route('/download/logs')
+def download_logs():
+    try:
+        return send_file(LOG_FILE, as_attachment=True, download_name="proxy_logs.txt")
+    except FileNotFoundError:
+        return "No logs found yet.", 404
+
+@app.route('/clear/logs', methods=['POST'])
+def clear_logs():
+    try:
+        if os.path.exists(LOG_FILE):
+            os.remove(LOG_FILE)
+        return jsonify({"status": "success"}), 200
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+@app.route('/', methods=["GET", "POST", "OPTIONS"])
+@app.route('/v1/chat/completions', methods=["GET", "POST", "OPTIONS"])
+def handle_proxy():
+    if request.method == "GET":
+        return render_template('index.html')
+    if request.method == "OPTIONS":
+        return jsonify({"status": "ok"}), 200
+
+    request_time = time.strftime("%Y-%m-%d %H:%M:%S")
+    print(f"\n[{request_time}] Received request")
+
+    try:
+        json_data = request.json or {}
+        is_streaming = json_data.get('stream', False)
+
+        api_key = None
+        auth_header = request.headers.get('authorization')
+        if auth_header and auth_header.startswith('Bearer '):
+            api_key = auth_header.split(' ')[1]
+        elif request.headers.get('x-api-key'):
+            api_key = request.headers.get('x-api-key')
+        elif json_data.get('api_key'):
+            api_key = json_data.get('api_key')
+
+        if not api_key:
+            return jsonify(create_error_response("Google AI API key required.")), 401
+
+        current_model = app_config["MODEL"]
+        current_temp = app_config["TEMPERATURE"]
+        current_max_tokens = app_config["MAX_TOKENS"]
+        current_nsfw = app_config["ENABLE_NSFW"]
+        current_thinking = app_config["ENABLE_THINKING"]
+        current_search = app_config["ENABLE_GOOGLE_SEARCH"]
+        use_classic = app_config["USE_CLASSIC_MODE"]
+        current_system_instruction = app_config["SYSTEM_INSTRUCTION"]
+
+        messages = json_data.get("messages", [])
+
+        if use_classic:
+            print(">> Using CLASSIC MODE for prompt injection")
+            if current_nsfw and nsfw_prefill:
+                if messages and messages[-1].get("role") == "user":
+                    messages.append({"content": nsfw_prefill, "role": "system"})
+                    if current_thinking:
+                        messages.append({"content": thinking_prompt, "role": "system"})
+                        messages.append({"content": reminder, "role": "system"})
+                    messages.append({"content": get_custom_assistant_prompt(), "role": "assistant"})
+                elif messages and messages[-1].get("role") == "assistant":
+                    existing_content = messages[-1].get("content", "")
+                    last_assistant = messages.pop()
+                    messages.append({"content": nsfw_prefill, "role": "system"})
+                    if current_thinking:
+                        messages.append({"content": thinking_prompt, "role": "system"})
+                        messages.append({"content": reminder, "role": "system"})
+                    if existing_content.strip() and existing_content.strip() != nsfw_prefill.strip():
+                        messages.append(last_assistant)
+                    messages.append({"content": get_custom_assistant_prompt(), "role": "assistant"})
+
+            json_data["messages"] = messages
+            google_ai_contents = transform_janitor_to_google_ai(messages, allow_model_end=True)
+            
+            google_ai_request = {
+                "contents": google_ai_contents,
+                "safetySettings": get_safety_settings(current_model),
+                "generationConfig": {"temperature": json_data.get('temperature', current_temp), "maxOutputTokens": json_data.get('max_tokens', current_max_tokens), "topP": 0.95, "topK": 40}
+            }
+        else:
+            print(">> Using SAFE MODE (systemInstruction)")
+            if current_thinking and messages:
+                thinking_forcing_prompt = "\n\n[SYSTEM DIRECTIVE: You must strictly begin your response now with <think> to plan your reply, close it with </think>, and then write the actual roleplay response starting with <response>. Do not output any plaintext before <think>.]"
+                last_user_idx = None
+                for i in range(len(messages) - 1, -1, -1):
+                    if messages[i].get("role") == "user":
+                        last_user_idx = i
+                        break
+                if last_user_idx is not None:
+                    messages[last_user_idx]["content"] += thinking_forcing_prompt
+                else:
+                    messages.append({"role": "user", "content": thinking_forcing_prompt})
+                json_data["messages"] = messages
+
+            google_ai_contents = transform_janitor_to_google_ai(messages, allow_model_end=False)
+            google_ai_request = {
+                "contents": google_ai_contents,
+                "safetySettings": get_safety_settings(current_model),
+                "generationConfig": {"temperature": json_data.get('temperature', current_temp), "maxOutputTokens": json_data.get('max_tokens', current_max_tokens), "topP": 0.95, "topK": 40}
+            }
+            if current_system_instruction and current_system_instruction.strip():
+                google_ai_request["systemInstruction"] = {"parts": [{"text": current_system_instruction}]}
+
+        selected_model = json_data.get('model') if json_data.get('model') and json_data['model'] != "custom" else current_model
+        if current_search:
+            google_ai_request["tools"] = [{"google_search": {}}]
+
+        endpoint = "streamGenerateContent" if is_streaming else "generateContent"
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{selected_model}:{endpoint}?key={api_key}"
+        if is_streaming: url += "&alt=sse"
+
+        headers = {'Content-Type': 'application/json'}
+        timeout_seconds = 300
+
+        log_data = f"[{request_time}] Model: {selected_model} | Mode: {'Classic' if use_classic else 'Safe'}\n"
+        log_data += "--- PROMPT SENT TO GOOGLE ---\n" + json.dumps(google_ai_request, indent=2, ensure_ascii=False)[:3000] + "\n"
+
+        if is_streaming:
+            def generate_stream():
+                response = None
+                parser = StreamingParser()
+                raw_google_text = ""
+                final_sent_text = ""
+                try:
+                    response = requests.post(url, json=google_ai_request, headers=headers, stream=True, timeout=timeout_seconds)
+                    response.raise_for_status()
+
+                    has_sent_data = False
+                    last_chunk_time = time.time()
+                    block_reason_detected = False
+
+                    for chunk in response.iter_lines():
+                        if chunk:
+                            chunk_str = chunk.decode('utf-8')
+                            if not chunk_str.startswith('data: '): continue
+                            data_str = chunk_str[len('data: '):].strip()
+                            if data_str == '[DONE]': break
+
+                            try:
+                                data = json.loads(data_str)
+                                if 'error' in data:
+                                    error_message = data['error'].get('message', 'Unknown error')
+                                    log_data += "--- GOOGLE ERROR ---\n" + error_message + "\n"
+                                    yield create_error_stream_chunk(f"Google AI Error: {error_message}")
+                                    yield 'data: [DONE]\n\n'
+                                    return
+
+                                content_delta = ""
+                                finish_reason = None
+                                if 'candidates' in data and data['candidates']:
+                                    candidate = data['candidates'][0]
+                                    if 'finishReason' in candidate and candidate['finishReason'] not in ['STOP', 'MAX_TOKENS']:
+                                        block_reason_detected = True
+                                        log_data += "--- BLOCKED BY GOOGLE ---\nReason: " + candidate['finishReason'] + "\n"
+                                        yield create_error_stream_chunk(f"Google AI blocked the response. Reason: {candidate['finishReason']}")
+                                        yield 'data: [DONE]\n\n'
+                                        return
+                                    if 'content' in candidate and 'parts' in candidate['content']:
+                                        for part in candidate['content']['parts']:
+                                            if 'text' in part:
+                                                content_delta += part['text']
+                                    finish_reason = candidate.get('finishReason')
+
+                                if not content_delta: continue
+                                raw_google_text += content_delta
+
+                                content_to_send, thinking_log, _ = parser.process_chunk(content_delta)
+                                if content_to_send:
+                                    has_sent_data = True
+                                    final_sent_text += content_to_send
+                                    last_chunk_time = time.time()
+                                    janitor_chunk = create_janitor_chunk(content_to_send, selected_model, finish_reason)
+                                    yield f'data: {json.dumps(janitor_chunk)}\n\n'
+                            except json.JSONDecodeError: continue
+
+                        if time.time() - last_chunk_time > timeout_seconds:
+                            log_data += "--- TIMEOUT ---\n"
+                            yield create_error_stream_chunk("Stream timed out")
+                            yield 'data: [DONE]\n\n'
+                            break
+
+                    if not has_sent_data and not block_reason_detected:
+                        # SAFETY NET: If parser never sent data because tags were broken, force clean and send
+                        if parser.all_content.strip():
+                            cleaned_content = parser.all_content.replace('<think>', '').replace('</think>', '').replace('<response>', '').replace('</response>', '').strip()
+                            if cleaned_content:
+                                final_sent_text = cleaned_content
+                                has_sent_data = True
+                                yield create_janitor_chunk(cleaned_content, selected_model, None)
+                        
+                        if not has_sent_data:
+                            log_data += "--- NO CONTENT RECEIVED ---\n"
+                            yield create_error_stream_chunk("No content received from Google AI.")
+                        
+                        yield 'data: [DONE]\n\n'
+
+                except Exception as e:
+                    log_data += "--- STREAMING EXCEPTION ---\n" + str(e) + "\n"
+                    yield create_error_stream_chunk(f"Error during streaming: {e}")
+                    yield 'data: [DONE]\n\n'
+                finally:
+                    if response: response.close()
+                    
+                    log_data += "--- RAW GOOGLE RESPONSE ---\n" + raw_google_text + "\n"
+                    log_data += "--- FINAL TEXT SENT TO JANITOR ---\n" + final_sent_text + "\n"
+                    write_log(log_data)
+
+            return Response(stream_with_context(generate_stream()), content_type='text/event-stream', headers={'Cache-Control': 'no-cache', 'Connection': 'keep-alive', 'X-Accel-Buffering': 'no'})
+
+        else:
+            response = requests.post(url, json=google_ai_request, headers=headers, timeout=timeout_seconds)
+            google_response = response.json()
+
+            if response.status_code != 200:
+                error_msg = f"Google AI returned error code: {response.status_code}"
+                if google_response and 'error' in google_response:
+                    error_detail = google_response['error'].get('message', response.text[:200])
+                    error_msg = f"{error_msg} - {error_detail}"
+                log_data += "--- GOOGLE ERROR ---\n" + error_msg + "\n"
+                write_log(log_data)
+                return jsonify(create_error_response(error_msg)), 200
+
+            if not google_response.get('candidates') or not google_response['candidates'][0].get('content'):
+                finish_reason = google_response.get('candidates', [{}])[0].get('finishReason', 'UNKNOWN')
+                log_data += "--- NO CONTENT / BLOCKED ---\nReason: " + finish_reason + "\n"
+                write_log(log_data)
+                return jsonify(create_error_response(f"No content received. Reason: {finish_reason}")), 200
+
+            candidate = google_response['candidates'][0]
+            content = ""
+            if 'content' in candidate and 'parts' in candidate['content']:
+                for part in candidate['content']['parts']:
+                    if 'text' in part: content += part['text']
+
+            log_data += "--- RAW GOOGLE RESPONSE ---\n" + content + "\n"
+
+            if current_thinking:
+                match = re.search(r'<response>(.*?)</response>', content, re.DOTALL)
+                if match:
+                    content = match.group(1).strip()
+                else:
+                    match_start = re.search(r'<response>(.*)', content, re.DOTALL)
+                    if match_start:
+                        content = match_start.group(1).strip()
+                    else:
+                        match_think = re.search(r'</think>(.*)', content, re.DOTALL)
+                        if match_think:
+                            content = match_think.group(1).strip()
+                        else:
+                            # SAFETY NET: Model forgot all closing tags. Strip everything to avoid hiding text.
+                            if '<think>' in content or '<response>' in content:
+                                content = content.replace('<think>', '').replace('</think>', '').replace('<response>', '').replace('</response>', '').strip()
+
+            log_data += "--- FINAL TEXT SENT TO JANITOR ---\n" + content + "\n"
+            write_log(log_data)
+
+            janitor_response = {
+                "id": f"chatcmpl-{int(time.time())}",
+                "object": "chat.completion",
+                "created": int(time.time()),
+                "model": selected_model,
+                "choices": [{"index": 0, "message": {"role": "assistant", "content": content}, "finish_reason": candidate.get('finishReason', 'stop')}],
+                "usage": google_response.get('usageMetadata', {})
+            }
+            return jsonify(janitor_response)
+
+    except Exception as e:
+        traceback.print_exc()
+        return jsonify(create_error_response(f"Proxy Internal Error: {str(e)}")), 500
+
+if __name__ == '__main__':
+    app.run(host='0.0.0.0', port=PORT)
 def transform_janitor_to_google_ai(messages, allow_model_end=False):
     if not messages or not isinstance(messages, list):
         return []
