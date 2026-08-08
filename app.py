@@ -36,12 +36,7 @@ nsfw_prefill = r'''<interaction-config>
 
 thinking_prompt = """You should structure your response using thinking tags:
 
-<think>
-[Your internal analysis here]
-[Plan your roleplay response]
-[Consider character motivations]
-[Any reasoning or thoughts]
-</think>
+
 <response>
 [Your actual roleplay content goes here]
 
@@ -165,7 +160,9 @@ class StreamingParser:
                         thinking_part = thinking_part.split('<think>', 1)[1]
                     self.thinking_content = thinking_part.strip()
                     thinking_log = self.thinking_content
-                    self.buffer = '</think>' + parts[1]
+                    
+                    # Clean the tag, only keep what's after it
+                    self.buffer = parts[1]
                     self.state = "found_think_end"
                     continue
                 elif '<response>' in self.buffer:
@@ -175,20 +172,31 @@ class StreamingParser:
                         thinking_part = thinking_part.split('<think>', 1)[1]
                     self.thinking_content = thinking_part.strip()
                     thinking_log = self.thinking_content
-                    self.buffer = '<response>' + parts[1]
+                    
+                    # Clean the tag, only keep what's after it
+                    self.buffer = parts[1]
                     self.state = "in_response"
                     continue
                 else:
                     break
             elif self.state == "found_think_end":
+                # If <response> tag appears, strip it
+                if '<response>' in self.buffer:
+                    self.buffer = self.buffer.replace('<response>', '', 1)
+                    self.state = "in_response"
+                    continue
+                
                 content_to_send = self.buffer
                 self.response_content += self.buffer
                 self.buffer = ""
-                self.state = "in_response"
                 break
             elif self.state == "in_response":
                 content_to_send = self.buffer
-                self.response_content += self.buffer
+                # Remove </response> if it appears
+                if '</response>' in content_to_send:
+                    content_to_send = content_to_send.replace('</response>', '')
+                
+                self.response_content += content_to_send
                 self.buffer = ""
                 if '</response>' in self.response_content:
                     self.state = "finished"
@@ -388,6 +396,12 @@ def handle_proxy():
                                     continue
 
                                 content_to_send, thinking_log, _ = parser.process_chunk(content_delta)
+                                
+                                if thinking_log:
+                                    print("\n" + "=" * 50)
+                                    print("THINKING PROCESS:")
+                                    print(thinking_log)
+                                    print("=" * 50)
 
                                 if content_to_send:
                                     has_sent_data = True
@@ -442,10 +456,20 @@ def handle_proxy():
                     if 'text' in part:
                         content += part['text']
 
+            # Clean up tags in non-streaming responses
             if current_thinking:
                 think_end = content.find('</think>')
+                response_start = content.find('<response>')
+                response_end = content.find('</response>')
+                
                 if think_end != -1:
-                    content = content[think_end:].strip()
+                    content = content[think_end + len('</think>'):]
+                if response_start != -1:
+                    content = content[response_start + len('<response>'):]
+                if response_end != -1:
+                    content = content[:response_end]
+                    
+                content = content.strip()
 
             janitor_response = {
                 "id": f"chatcmpl-{int(time.time())}",
