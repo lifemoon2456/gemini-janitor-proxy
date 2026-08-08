@@ -4,6 +4,7 @@ import time
 import requests
 import traceback
 import threading
+import re
 from flask import Flask, request, jsonify, Response, stream_with_context, render_template, send_file
 from flask_cors import CORS
 
@@ -37,12 +38,7 @@ nsfw_prefill = r'''<interaction-config>
 
 thinking_prompt = """You should structure your response using thinking tags:
 
-<think>
-[Your internal analysis here]
-[Plan your roleplay response]
-[Consider character motivations]
-[Any reasoning or thoughts]
-</think>
+
 <response>
 [Your actual roleplay content goes here]
 
@@ -74,10 +70,8 @@ LOG_FILE = "proxy_logs.txt"
 log_lock = threading.Lock()
 
 def write_log(content):
-    """Safely writes logs to a file without crashing the server."""
     try:
         with log_lock:
-            # Keep file size under 5MB to prevent Render free tier issues
             if os.path.exists(LOG_FILE) and os.path.getsize(LOG_FILE) > 5 * 1024 * 1024:
                 os.remove(LOG_FILE)
             with open(LOG_FILE, "a", encoding="utf-8") as f:
@@ -365,7 +359,6 @@ def handle_proxy():
         headers = {'Content-Type': 'application/json'}
         timeout_seconds = 300
 
-        # Log the outgoing request
         log_data = f"[{request_time}] Model: {selected_model} | Mode: {'Classic' if use_classic else 'Safe'}\n"
         log_data += "--- PROMPT SENT TO GOOGLE ---\n" + json.dumps(google_ai_request, indent=2, ensure_ascii=False)[:3000] + "\n"
 
@@ -445,7 +438,6 @@ def handle_proxy():
                 finally:
                     if response: response.close()
                     
-                    # Write to black box
                     log_data += "--- RAW GOOGLE RESPONSE ---\n" + raw_google_text + "\n"
                     log_data += "--- FINAL TEXT SENT TO JANITOR ---\n" + final_sent_text + "\n"
                     write_log(log_data)
@@ -480,13 +472,21 @@ def handle_proxy():
             log_data += "--- RAW GOOGLE RESPONSE ---\n" + content + "\n"
 
             if current_thinking:
-                think_end = content.find('</think>')
-                response_start = content.find('<response>')
-                response_end = content.find('</response>')
-                if think_end != -1: content = content[think_end + len('</think>'):]
-                if response_start != -1: content = content[response_start + len('<response>'):]
-                if response_end != -1: content = content[:response_end]
-                content = content.strip()
+                # SMART REGEX EXTRACTION: Safely extracts exactly what is inside <response>...</response>
+                # without cutting any text from the roleplay.
+                match = re.search(r'<response>(.*?)</response>', content, re.DOTALL)
+                if match:
+                    content = match.group(1).strip()
+                else:
+                    # Fallback if </response> is missing but <response> exists
+                    match_start = re.search(r'<response>(.*)', content, re.DOTALL)
+                    if match_start:
+                        content = match_start.group(1).strip()
+                    else:
+                        # Fallback if model didn't use response tag but used think tag
+                        match_think = re.search(r'</think>(.*)', content, re.DOTALL)
+                        if match_think:
+                            content = match_think.group(1).strip()
 
             log_data += "--- FINAL TEXT SENT TO JANITOR ---\n" + content + "\n"
             write_log(log_data)
