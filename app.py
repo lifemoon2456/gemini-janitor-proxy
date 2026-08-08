@@ -3,7 +3,8 @@ import json
 import time
 import requests
 import traceback
-from flask import Flask, request, jsonify, Response, stream_with_context, render_template
+import threading
+from flask import Flask, request, jsonify, Response, stream_with_context, render_template, send_file
 from flask_cors import CORS
 
 # ===================================================================
@@ -36,7 +37,12 @@ nsfw_prefill = r'''<interaction-config>
 
 thinking_prompt = """You should structure your response using thinking tags:
 
-
+<think>
+[Your internal analysis here]
+[Plan your roleplay response]
+[Consider character motivations]
+[Any reasoning or thoughts]
+</think>
 <response>
 [Your actual roleplay content goes here]
 
@@ -50,7 +56,7 @@ def get_custom_assistant_prompt():
 DEFAULT_SYSTEM_INSTRUCTION = nsfw_prefill + "\n\n" + thinking_prompt
 
 # ===================================================================
-#  Configuration
+#  Configuration & Logging
 # ===================================================================
 
 app_config = {
@@ -64,10 +70,20 @@ app_config = {
     "SYSTEM_INSTRUCTION": os.environ.get("SYSTEM_INSTRUCTION", DEFAULT_SYSTEM_INSTRUCTION)
 }
 PORT = int(os.environ.get("PORT", 5000))
+LOG_FILE = "proxy_logs.txt"
+log_lock = threading.Lock()
 
-# ===================================================================
-#  Flask App
-# ===================================================================
+def write_log(content):
+    """Safely writes logs to a file without crashing the server."""
+    try:
+        with log_lock:
+            # Keep file size under 5MB to prevent Render free tier issues
+            if os.path.exists(LOG_FILE) and os.path.getsize(LOG_FILE) > 5 * 1024 * 1024:
+                os.remove(LOG_FILE)
+            with open(LOG_FILE, "a", encoding="utf-8") as f:
+                f.write(content + "\n\n" + "="*80 + "\n\n")
+    except Exception as e:
+        print(f"Failed to write log: {e}")
 
 app = Flask(__name__)
 CORS(app)
@@ -174,8 +190,6 @@ class StreamingParser:
                     self.state = "in_response"
                     continue
                 else:
-                    # SMART FALLBACK: If we have accumulated text and it doesn't start with <think>, 
-                    # the model ignored the thinking directive. Send it as normal response immediately!
                     stripped_content = self.all_content.lstrip()
                     if stripped_content and not stripped_content.startswith('<think') and not stripped_content.startswith('<resp'):
                         content_to_send = self.buffer
@@ -183,15 +197,12 @@ class StreamingParser:
                         self.buffer = ""
                         self.state = "in_response"
                         break
-                    
-                    # If it starts with < but isn't a think/response tag (e.g., markdown), send it too
                     if stripped_content.startswith('<') and not stripped_content.startswith('<think') and not stripped_content.startswith('<resp'):
                         content_to_send = self.buffer
                         self.response_content += self.buffer
                         self.buffer = ""
                         self.state = "in_response"
                         break
-                        
                     break
             elif self.state == "found_think_end":
                 if '<response>' in self.buffer:
@@ -236,6 +247,22 @@ def api_settings():
             return jsonify({"status": "success", "message": "Settings updated"}), 200
         except Exception as e:
             return jsonify({"status": "error", "message": str(e)}), 400
+
+@app.route('/download/logs')
+def download_logs():
+    try:
+        return send_file(LOG_FILE, as_attachment=True, download_name="proxy_logs.txt")
+    except FileNotFoundError:
+        return "No logs found yet.", 404
+
+@app.route('/clear/logs', methods=['POST'])
+def clear_logs():
+    try:
+        if os.path.exists(LOG_FILE):
+            os.remove(LOG_FILE)
+        return jsonify({"status": "success"}), 200
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
 
 @app.route('/', methods=["GET", "POST", "OPTIONS"])
 @app.route('/v1/chat/completions', methods=["GET", "POST", "OPTIONS"])
@@ -284,7 +311,6 @@ def handle_proxy():
                         messages.append({"content": thinking_prompt, "role": "system"})
                         messages.append({"content": reminder, "role": "system"})
                     messages.append({"content": get_custom_assistant_prompt(), "role": "assistant"})
-
                 elif messages and messages[-1].get("role") == "assistant":
                     existing_content = messages[-1].get("content", "")
                     last_assistant = messages.pop()
@@ -302,14 +328,8 @@ def handle_proxy():
             google_ai_request = {
                 "contents": google_ai_contents,
                 "safetySettings": get_safety_settings(current_model),
-                "generationConfig": {
-                    "temperature": json_data.get('temperature', current_temp),
-                    "maxOutputTokens": json_data.get('max_tokens', current_max_tokens),
-                    "topP": 0.95,
-                    "topK": 40
-                }
+                "generationConfig": {"temperature": json_data.get('temperature', current_temp), "maxOutputTokens": json_data.get('max_tokens', current_max_tokens), "topP": 0.95, "topK": 40}
             }
-
         else:
             print(">> Using SAFE MODE (systemInstruction)")
             if current_thinking and messages:
@@ -326,39 +346,35 @@ def handle_proxy():
                 json_data["messages"] = messages
 
             google_ai_contents = transform_janitor_to_google_ai(messages, allow_model_end=False)
-            
             google_ai_request = {
                 "contents": google_ai_contents,
                 "safetySettings": get_safety_settings(current_model),
-                "generationConfig": {
-                    "temperature": json_data.get('temperature', current_temp),
-                    "maxOutputTokens": json_data.get('max_tokens', current_max_tokens),
-                    "topP": 0.95,
-                    "topK": 40
-                }
+                "generationConfig": {"temperature": json_data.get('temperature', current_temp), "maxOutputTokens": json_data.get('max_tokens', current_max_tokens), "topP": 0.95, "topK": 40}
             }
-
             if current_system_instruction and current_system_instruction.strip():
                 google_ai_request["systemInstruction"] = {"parts": [{"text": current_system_instruction}]}
 
         selected_model = json_data.get('model') if json_data.get('model') and json_data['model'] != "custom" else current_model
-
         if current_search:
             google_ai_request["tools"] = [{"google_search": {}}]
 
         endpoint = "streamGenerateContent" if is_streaming else "generateContent"
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{selected_model}:{endpoint}?key={api_key}"
-
-        if is_streaming:
-            url += "&alt=sse"
+        if is_streaming: url += "&alt=sse"
 
         headers = {'Content-Type': 'application/json'}
         timeout_seconds = 300
+
+        # Log the outgoing request
+        log_data = f"[{request_time}] Model: {selected_model} | Mode: {'Classic' if use_classic else 'Safe'}\n"
+        log_data += "--- PROMPT SENT TO GOOGLE ---\n" + json.dumps(google_ai_request, indent=2, ensure_ascii=False)[:3000] + "\n"
 
         if is_streaming:
             def generate_stream():
                 response = None
                 parser = StreamingParser()
+                raw_google_text = ""
+                final_sent_text = ""
                 try:
                     response = requests.post(url, json=google_ai_request, headers=headers, stream=True, timeout=timeout_seconds)
                     response.raise_for_status()
@@ -370,79 +386,71 @@ def handle_proxy():
                     for chunk in response.iter_lines():
                         if chunk:
                             chunk_str = chunk.decode('utf-8')
-                            if not chunk_str.startswith('data: '):
-                                continue
-
+                            if not chunk_str.startswith('data: '): continue
                             data_str = chunk_str[len('data: '):].strip()
-                            if data_str == '[DONE]':
-                                yield 'data: [DONE]\n\n'
-                                break
+                            if data_str == '[DONE]': break
 
                             try:
                                 data = json.loads(data_str)
                                 if 'error' in data:
                                     error_message = data['error'].get('message', 'Unknown error')
+                                    log_data += "--- GOOGLE ERROR ---\n" + error_message + "\n"
                                     yield create_error_stream_chunk(f"Google AI Error: {error_message}")
                                     yield 'data: [DONE]\n\n'
                                     return
 
                                 content_delta = ""
                                 finish_reason = None
-
                                 if 'candidates' in data and data['candidates']:
                                     candidate = data['candidates'][0]
                                     if 'finishReason' in candidate and candidate['finishReason'] not in ['STOP', 'MAX_TOKENS']:
                                         block_reason_detected = True
+                                        log_data += "--- BLOCKED BY GOOGLE ---\nReason: " + candidate['finishReason'] + "\n"
                                         yield create_error_stream_chunk(f"Google AI blocked the response. Reason: {candidate['finishReason']}")
                                         yield 'data: [DONE]\n\n'
                                         return
-
                                     if 'content' in candidate and 'parts' in candidate['content']:
                                         for part in candidate['content']['parts']:
                                             if 'text' in part:
                                                 content_delta += part['text']
+                                    finish_reason = candidate.get('finishReason')
 
-                                if not content_delta:
-                                    continue
+                                if not content_delta: continue
+                                raw_google_text += content_delta
 
                                 content_to_send, thinking_log, _ = parser.process_chunk(content_delta)
-                                
-                                if thinking_log:
-                                    print("\n" + "=" * 50)
-                                    print("THINKING PROCESS:")
-                                    print(thinking_log)
-                                    print("=" * 50)
-
                                 if content_to_send:
                                     has_sent_data = True
+                                    final_sent_text += content_to_send
                                     last_chunk_time = time.time()
                                     janitor_chunk = create_janitor_chunk(content_to_send, selected_model, finish_reason)
                                     yield f'data: {json.dumps(janitor_chunk)}\n\n'
-
-                            except json.JSONDecodeError:
-                                continue
+                            except json.JSONDecodeError: continue
 
                         if time.time() - last_chunk_time > timeout_seconds:
+                            log_data += "--- TIMEOUT ---\n"
                             yield create_error_stream_chunk("Stream timed out")
                             yield 'data: [DONE]\n\n'
                             break
 
                     if not has_sent_data and not block_reason_detected:
+                        log_data += "--- NO CONTENT RECEIVED ---\n"
                         yield create_error_stream_chunk("No content received from Google AI.")
                         yield 'data: [DONE]\n\n'
 
                 except Exception as e:
+                    log_data += "--- STREAMING EXCEPTION ---\n" + str(e) + "\n"
                     yield create_error_stream_chunk(f"Error during streaming: {e}")
                     yield 'data: [DONE]\n\n'
                 finally:
-                    if response:
-                        response.close()
+                    if response: response.close()
+                    
+                    # Write to black box
+                    log_data += "--- RAW GOOGLE RESPONSE ---\n" + raw_google_text + "\n"
+                    log_data += "--- FINAL TEXT SENT TO JANITOR ---\n" + final_sent_text + "\n"
+                    write_log(log_data)
 
-            return Response(
-                stream_with_context(generate_stream()),
-                content_type='text/event-stream',
-                headers={'Cache-Control': 'no-cache', 'Connection': 'keep-alive', 'X-Accel-Buffering': 'no'}
-            )
+            return Response(stream_with_context(generate_stream()), content_type='text/event-stream', headers={'Cache-Control': 'no-cache', 'Connection': 'keep-alive', 'X-Accel-Buffering': 'no'})
 
         else:
             response = requests.post(url, json=google_ai_request, headers=headers, timeout=timeout_seconds)
@@ -453,43 +461,42 @@ def handle_proxy():
                 if google_response and 'error' in google_response:
                     error_detail = google_response['error'].get('message', response.text[:200])
                     error_msg = f"{error_msg} - {error_detail}"
+                log_data += "--- GOOGLE ERROR ---\n" + error_msg + "\n"
+                write_log(log_data)
                 return jsonify(create_error_response(error_msg)), 200
 
             if not google_response.get('candidates') or not google_response['candidates'][0].get('content'):
                 finish_reason = google_response.get('candidates', [{}])[0].get('finishReason', 'UNKNOWN')
+                log_data += "--- NO CONTENT / BLOCKED ---\nReason: " + finish_reason + "\n"
+                write_log(log_data)
                 return jsonify(create_error_response(f"No content received. Reason: {finish_reason}")), 200
 
             candidate = google_response['candidates'][0]
             content = ""
             if 'content' in candidate and 'parts' in candidate['content']:
                 for part in candidate['content']['parts']:
-                    if 'text' in part:
-                        content += part['text']
+                    if 'text' in part: content += part['text']
+
+            log_data += "--- RAW GOOGLE RESPONSE ---\n" + content + "\n"
 
             if current_thinking:
                 think_end = content.find('</think>')
                 response_start = content.find('<response>')
                 response_end = content.find('</response>')
-                
-                if think_end != -1:
-                    content = content[think_end + len('</think>'):]
-                if response_start != -1:
-                    content = content[response_start + len('<response>'):]
-                if response_end != -1:
-                    content = content[:response_end]
-                    
+                if think_end != -1: content = content[think_end + len('</think>'):]
+                if response_start != -1: content = content[response_start + len('<response>'):]
+                if response_end != -1: content = content[:response_end]
                 content = content.strip()
+
+            log_data += "--- FINAL TEXT SENT TO JANITOR ---\n" + content + "\n"
+            write_log(log_data)
 
             janitor_response = {
                 "id": f"chatcmpl-{int(time.time())}",
                 "object": "chat.completion",
                 "created": int(time.time()),
                 "model": selected_model,
-                "choices": [{
-                    "index": 0,
-                    "message": {"role": "assistant", "content": content},
-                    "finish_reason": candidate.get('finishReason', 'stop')
-                }],
+                "choices": [{"index": 0, "message": {"role": "assistant", "content": content}, "finish_reason": candidate.get('finishReason', 'stop')}],
                 "usage": google_response.get('usageMetadata', {})
             }
             return jsonify(janitor_response)
