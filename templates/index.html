@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="ar" dir="rtl">
+<html lang="en" dir="ltr">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -7,11 +7,13 @@
     <style>
         body { background-color: #121212; color: #e0e0e0; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; margin: 0; padding: 20px; }
         .container { max-width: 800px; margin: auto; background: #1e1e1e; padding: 30px; border-radius: 12px; box-shadow: 0 4px 15px rgba(0,0,0,0.5); }
-        h1 { text-align: center; color: #4285f4; margin-top: 0; font-size: 24px; }
+        .header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; }
+        h1 { color: #4285f4; margin: 0; font-size: 24px; }
+        select { padding: 8px; background: #2d2d2d; border: 1px solid #444; border-radius: 6px; color: #e0e0e0; cursor: pointer; }
         .form-group { margin-bottom: 20px; }
         label { display: block; margin-bottom: 8px; color: #bdc1c6; font-weight: bold; font-size: 14px; }
         input[type="text"], input[type="number"], textarea { width: 100%; padding: 10px; background: #2d2d2d; border: 1px solid #444; border-radius: 6px; color: #e0e0e0; box-sizing: border-box; }
-        textarea { font-family: 'Courier New', Courier, monospace; min-height: 200px; resize: vertical; line-height: 1.4; }
+        textarea { font-family: 'Courier New', Courier, monospace; min-height: 150px; resize: vertical; line-height: 1.4; }
         .switch-group { display: flex; justify-content: space-between; align-items: center; background: #2d2d2d; padding: 12px 15px; border-radius: 6px; margin-bottom: 15px; }
         .switch { position: relative; display: inline-block; width: 50px; height: 26px; }
         .switch input { opacity: 0; width: 0; height: 0; }
@@ -19,11 +21,11 @@
         .slider:before { position: absolute; content: ""; height: 20px; width: 20px; right: 3px; bottom: 3px; background-color: white; transition: .3s; border-radius: 50%; }
         input:checked + .slider { background-color: #4285f4; }
         input:checked + .slider:before { transform: translateX(-24px); }
-        .btn { width: 100%; padding: 12px; border: none; border-radius: 6px; font-size: 16px; font-weight: bold; cursor: pointer; transition: 0.2s; margin-top: 10px; }
+        .btn { width: 100%; padding: 12px; border: none; border-radius: 6px; font-size: 16px; font-weight: bold; cursor: pointer; transition: 0.2s; margin-top: 10px; text-align: center; text-decoration: none; display: block; box-sizing: border-box;}
         .btn-save { background: #4285f4; color: white; }
         .btn-save:hover { background: #357ae8; }
-        .btn-log { background: #1e8e3e; color: white; width: 48%; display: inline-block; text-decoration: none; text-align: center; }
-        .btn-clear { background: #d93025; color: white; width: 48%; display: inline-block; }
+        .btn-log { background: #1e8e3e; color: white; width: 48%; display: inline-block; }
+        .btn-clear { background: #d93025; color: white; width: 48%; display: inline-block; border: none; }
         .status { margin-top: 20px; text-align: center; padding: 10px; border-radius: 6px; display: none; }
         .success { background: #1e8e3e; color: white; }
         .error { background: #d93025; color: white; }
@@ -33,67 +35,92 @@
 </head>
 <body>
     <div class="container">
-        <h1>🤖 لوحة تحكم Gemini Proxy</h1>
+        <div class="header">
+            <h1 data-i18n="title">🤖 Gemini Proxy Control Panel</h1>
+            <select id="langSelector">
+                <option value="ar">🇸🇦 العربية</option>
+                <option value="en">🇬🇧 English</option>
+                <option value="es">🇪🇸 Español</option>
+            </select>
+        </div>
         <form id="configForm">
             <div class="form-group">
-                <label>اسم النموذج (Model)</label>
+                <label data-i18n="model_name">Model Name</label>
                 <input type="text" id="MODEL" placeholder="gemini-2.5-flash">
             </div>
-            
             <div style="display: flex; gap: 15px;">
                 <div class="form-group" style="flex: 1;">
-                    <label>درجة الحرارة (Temperature)</label>
+                    <label data-i18n="temperature">Temperature</label>
                     <input type="number" step="0.01" id="TEMPERATURE">
                 </div>
                 <div class="form-group" style="flex: 1;">
-                    <label>أقصى حد للرموز (Max Tokens)</label>
+                    <label data-i18n="max_tokens">Max Tokens</label>
                     <input type="number" id="MAX_TOKENS">
                 </div>
             </div>
 
             <div class="switch-group" style="background: #3b1e1e; border: 1px solid #d93025;">
-                <span>🔴 استخدام الوضع الكلاسيكي (Classic Mode)</span>
+                <span data-i18n="classic_mode">🔴 Use Classic Mode</span>
                 <label class="switch"><input type="checkbox" id="USE_CLASSIC_MODE"><span class="slider"></span></label>
             </div>
-            
-            <div class="form-group" id="safe-mode-only">
-                <label>تعليمات النظام (System Instruction) - يعمل في الوضع الآمن فقط</label>
-                <textarea id="SYSTEM_INSTRUCTION" placeholder="اكتب أو عدل التعليمات هنا..."></textarea>
+            <div class="form-group">
+                <label data-i18n="system_instruction">System Instruction</label>
+                <textarea id="SYSTEM_INSTRUCTION"></textarea>
             </div>
-
             <div class="switch-group">
-                <span>تفعيل المحتوى للبالغين (NSFW)</span>
+                <span data-i18n="nsfw">Enable NSFW</span>
                 <label class="switch"><input type="checkbox" id="ENABLE_NSFW"><span class="slider"></span></label>
             </div>
             <div class="switch-group">
-                <span>تفعيل وضع التفكير (Thinking)</span>
+                <span data-i18n="thinking">Enable Thinking</span>
                 <label class="switch"><input type="checkbox" id="ENABLE_THINKING"><span class="slider"></span></label>
             </div>
             <div class="switch-group">
-                <span>تفعيل بحث جوجل (Google Search)</span>
+                <span data-i18n="google_search">Enable Google Search</span>
                 <label class="switch"><input type="checkbox" id="ENABLE_GOOGLE_SEARCH"><span class="slider"></span></label>
             </div>
-            
-            <button type="submit" class="btn btn-save">حفظ الإعدادات</button>
+            <button type="submit" class="btn btn-save" data-i18n="save">Save Settings</button>
         </form>
         <div id="statusMsg" class="status"></div>
-        
         <div style="display: flex; justify-content: space-between; margin-top: 20px;">
-            <a href="/download/logs" class="btn btn-log">📥 تحميل السجلات التفصيلية</a>
-            <button class="btn btn-clear" onclick="clearLogs()">🗑️ مسح السجلات</button>
+            <a href="/download/logs" class="btn btn-log" data-i18n="download_logs">📥 Download Logs</a>
+            <button class="btn btn-clear" onclick="clearLogs()" data-i18n="clear_logs">🗑️ Clear Logs</button>
         </div>
-
-        <div class="warning-box">
-            <b>تنبيه بخصوص الوضع الكلاسيكي:</b> إذا قمت بتشغيله، سيتجاهل النظام مربع التعليمات بالأعلى وسيستخدم طريقة الحقن القديمة (إضافة رسائل Assistant).
-        </div>
+        <div class="warning-box" data-i18n="warning_classic">Classic Mode Warning.</div>
         <div class="info-box">
-            <b>ملاحظة:</b> التعديلات هنا تُحفظ في ذاكرة السيرفر المؤقتة. إذا قامت Render بإعادة تشغيل السيرفر، ستعود الإعدادات لقيمها الافتراضية. 
-            <br><br>
-            <b>رابط JanitorAI:</b> استخدم نفس الرابط الذي ينتهي بـ <code>/v1/chat/completions</code>
+            <p data-i18n="note_env">Note: Changes here are temporary.</p>
+            <p data-i18n="note_url">JanitorAI URL: ends with /v1/chat/completions</p>
         </div>
     </div>
-
     <script>
+        let translations = {};
+        let currentLang = localStorage.getItem('lang') || (navigator.language || 'en').split('-')[0];
+        if (!['ar', 'en', 'es'].includes(currentLang)) currentLang = 'en';
+
+        async function loadTranslations() {
+            const res = await fetch('/translations.json');
+            translations = await res.json();
+            document.getElementById('langSelector').value = currentLang;
+            applyTranslations();
+        }
+
+        function applyTranslations() {
+            const dict = translations[currentLang];
+            if (!dict) return;
+            document.querySelectorAll('[data-i18n]').forEach(el => {
+                const key = el.getAttribute('data-i18n');
+                if (dict[key]) el.innerText = dict[key];
+            });
+            document.documentElement.lang = currentLang;
+            document.documentElement.dir = currentLang === 'ar' ? 'rtl' : 'ltr';
+        }
+
+        document.getElementById('langSelector').addEventListener('change', (e) => {
+            currentLang = e.target.value;
+            localStorage.setItem('lang', currentLang);
+            applyTranslations();
+        });
+
         async function loadSettings() {
             const res = await fetch('/api/settings');
             const data = await res.json();
@@ -119,32 +146,24 @@
                 ENABLE_GOOGLE_SEARCH: document.getElementById('ENABLE_GOOGLE_SEARCH').checked,
                 USE_CLASSIC_MODE: document.getElementById('USE_CLASSIC_MODE').checked
             };
-            
-            const res = await fetch('/api/settings', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(payload)
-            });
-            
+            const res = await fetch('/api/settings', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
             const statusMsg = document.getElementById('statusMsg');
-            if(res.ok) {
-                statusMsg.textContent = "✅ تم حفظ الإعدادات بنجاح!";
-                statusMsg.className = "status success";
-            } else {
-                statusMsg.textContent = "❌ حدث خطأ أثناء الحفظ.";
-                statusMsg.className = "status error";
-            }
+            const dict = translations[currentLang];
+            if(res.ok) { statusMsg.textContent = dict.success_msg; statusMsg.className = "status success"; }
+            else { statusMsg.textContent = dict.error_msg; statusMsg.className = "status error"; }
             statusMsg.style.display = 'block';
             setTimeout(() => statusMsg.style.display = 'none', 3000);
         });
 
         async function clearLogs() {
-            if(confirm("هل أنت متأكد من مسح جميع السجلات؟")) {
+            const dict = translations[currentLang];
+            if(confirm(dict.confirm_clear)) {
                 await fetch('/clear/logs', { method: 'POST' });
-                alert("تم مسح السجلات بنجاح.");
+                alert(dict.alert_cleared);
             }
         }
 
+        loadTranslations();
         loadSettings();
     </script>
 </body>
