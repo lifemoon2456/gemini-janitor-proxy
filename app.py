@@ -5,7 +5,7 @@ import requests
 import traceback
 import threading
 import re
-from flask import Flask, request, jsonify, Response, stream_with_context, send_file
+from flask import Flask, request, jsonify, Response, stream_with_context, render_template, send_file
 from flask_cors import CORS
 
 # ===================================================================
@@ -38,13 +38,18 @@ nsfw_prefill = r'''<interaction-config>
 
 thinking_prompt = """You should structure your response using thinking tags:
 
-
+<think>
+[Your internal analysis here]
+[Plan your roleplay response]
+[Consider character motivations]
+[Any reasoning or thoughts]
+</think>
 <response>
 [Your actual roleplay content goes here]
 
 This format helps separate your reasoning from the actual roleplay content."""
 
-reminder = "Remember to use  for your reasoning and <response>... for your roleplay content."
+reminder = "Remember to use <think>...</think> for your reasoning and <response>... for your roleplay content."
 
 def get_custom_assistant_prompt():
     return """Alright, let's start with the thinking. I'll close it once I'm done. <think>"""
@@ -72,12 +77,9 @@ log_lock = threading.Lock()
 def write_log(content):
     try:
         with log_lock:
-            if os.path.exists(LOG_FILE) and os.path.getsize(LOG_FILE) > 5 * 1024 * 1024:
-                os.remove(LOG_FILE)
-            with open(LOG_FILE, "a", encoding="utf-8") as f:
-                f.write(content + "\n\n" + "="*80 + "\n\n")
-    except Exception as e:
-        print(f"Failed to write log: {e}")
+            if os.path.exists(LOG_FILE) and os.path.getsize(LOG_FILE) > 5 * 1024 * 1024: os.remove(LOG_FILE)
+            with open(LOG_FILE, "a", encoding="utf-8") as f: f.write(content + "\n\n" + "="*80 + "\n\n")
+    except Exception as e: print(f"Failed to write log: {e}")
 
 app = Flask(__name__)
 CORS(app)
@@ -106,45 +108,34 @@ def get_safety_settings(model_name):
 
 def transform_janitor_to_google_ai(messages, allow_model_end=False):
     if not messages or not isinstance(messages, list): return []
-    google_ai_contents = []
-    current_role = None
+    google_ai_contents = []; current_role = None
     for msg in messages:
         role = msg.get('role'); content = msg.get('content')
         if not content: continue
         mapped_role = "user" if role == 'user' else "model"
         if mapped_role == current_role: google_ai_contents[-1]["parts"][0]["text"] += "\n\n" + content
-        else:
-            google_ai_contents.append({"role": mapped_role, "parts": [{"text": content}]})
-            current_role = mapped_role
-    if not allow_model_end and google_ai_contents and google_ai_contents[-1]["role"] == "model":
-        google_ai_contents.append({"role": "user", "parts": [{"text": "Continue."}]})
+        else: google_ai_contents.append({"role": mapped_role, "parts": [{"text": content}]}); current_role = mapped_role
+    if not allow_model_end and google_ai_contents and google_ai_contents[-1]["role"] == "model": google_ai_contents.append({"role": "user", "parts": [{"text": "Continue."}]})
     return google_ai_contents
 
 def create_janitor_chunk(content, model_name, finish_reason=None):
-    return {
-        "id": f"chatcmpl-stream-{int(time.time())}", "object": "chat.completion.chunk", "created": int(time.time()), "model": model_name,
-        "choices": [{"index": 0, "delta": {"content": content}, "finish_reason": finish_reason if finish_reason and finish_reason != "STOP" else None}]
-    }
+    return {"id": f"chatcmpl-stream-{int(time.time())}", "object": "chat.completion.chunk", "created": int(time.time()), "model": model_name, "choices": [{"index": 0, "delta": {"content": content}, "finish_reason": finish_reason if finish_reason and finish_reason != "STOP" else None}]}
 
 class StreamingParser:
     def __init__(self): self.reset()
-    def reset(self):
-        self.state = "searching"; self.thinking_content = ""; self.response_content = ""; self.buffer = ""; self.all_content = ""
+    def reset(self): self.state = "searching"; self.thinking_content = ""; self.response_content = ""; self.buffer = ""; self.all_content = ""
     def process_chunk(self, chunk_content):
-        self.buffer += chunk_content; self.all_content += chunk_content
-        content_to_send = ""; thinking_log = ""
+        self.buffer += chunk_content; self.all_content += chunk_content; content_to_send = ""; thinking_log = ""
         while True:
             if self.state == "searching":
                 if '</think>' in self.buffer:
                     parts = self.buffer.split('</think>', 1); thinking_part = self.all_content[:self.all_content.find('</think>')]
                     if '<think>' in thinking_part: thinking_part = thinking_part.split('<think>', 1)[1]
-                    self.thinking_content = thinking_part.strip(); thinking_log = self.thinking_content
-                    self.buffer = parts[1]; self.state = "found_think_end"; continue
+                    self.thinking_content = thinking_part.strip(); thinking_log = self.thinking_content; self.buffer = parts[1]; self.state = "found_think_end"; continue
                 elif '<response>' in self.buffer:
                     parts = self.buffer.split('<response>', 1); thinking_part = self.all_content[:self.all_content.find('<response>')]
                     if '<think>' in thinking_part: thinking_part = thinking_part.split('<think>', 1)[1]
-                    self.thinking_content = thinking_part.strip(); thinking_log = self.thinking_content
-                    self.buffer = parts[1]; self.state = "in_response"; continue
+                    self.thinking_content = thinking_part.strip(); thinking_log = self.thinking_content; self.buffer = parts[1]; self.state = "in_response"; continue
                 else:
                     stripped_content = self.all_content.lstrip()
                     if stripped_content and not stripped_content.startswith('<think') and not stripped_content.startswith('<resp'):
@@ -166,193 +157,13 @@ class StreamingParser:
         return content_to_send, thinking_log, is_complete
 
 # ===================================================================
-#  Multi-Language UI (HTML/JS)
-# ===================================================================
-
-HTML_UI = """
-<!DOCTYPE html>
-<html lang="en" dir="ltr">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Gemini Proxy Control Panel</title>
-    <style>
-        body { background-color: #121212; color: #e0e0e0; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; margin: 0; padding: 20px; }
-        .container { max-width: 800px; margin: auto; background: #1e1e1e; padding: 30px; border-radius: 12px; box-shadow: 0 4px 15px rgba(0,0,0,0.5); }
-        .header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; }
-        h1 { color: #4285f4; margin: 0; font-size: 24px; }
-        select { padding: 8px; background: #2d2d2d; border: 1px solid #444; border-radius: 6px; color: #e0e0e0; cursor: pointer; }
-        .form-group { margin-bottom: 20px; }
-        label { display: block; margin-bottom: 8px; color: #bdc1c6; font-weight: bold; font-size: 14px; }
-        input[type="text"], input[type="number"], textarea { width: 100%; padding: 10px; background: #2d2d2d; border: 1px solid #444; border-radius: 6px; color: #e0e0e0; box-sizing: border-box; }
-        textarea { font-family: 'Courier New', Courier, monospace; min-height: 150px; resize: vertical; line-height: 1.4; }
-        .switch-group { display: flex; justify-content: space-between; align-items: center; background: #2d2d2d; padding: 12px 15px; border-radius: 6px; margin-bottom: 15px; }
-        .switch { position: relative; display: inline-block; width: 50px; height: 26px; }
-        .switch input { opacity: 0; width: 0; height: 0; }
-        .slider { position: absolute; cursor: pointer; top: 0; left: 0; right: 0; bottom: 0; background-color: #555; transition: .3s; border-radius: 26px; }
-        .slider:before { position: absolute; content: ""; height: 20px; width: 20px; right: 3px; bottom: 3px; background-color: white; transition: .3s; border-radius: 50%; }
-        input:checked + .slider { background-color: #4285f4; }
-        input:checked + .slider:before { transform: translateX(-24px); }
-        .btn { width: 100%; padding: 12px; border: none; border-radius: 6px; font-size: 16px; font-weight: bold; cursor: pointer; transition: 0.2s; margin-top: 10px; text-align: center; text-decoration: none; display: block; box-sizing: border-box;}
-        .btn-save { background: #4285f4; color: white; }
-        .btn-save:hover { background: #357ae8; }
-        .btn-log { background: #1e8e3e; color: white; width: 48%; display: inline-block; }
-        .btn-clear { background: #d93025; color: white; width: 48%; display: inline-block; border: none; }
-        .status { margin-top: 20px; text-align: center; padding: 10px; border-radius: 6px; display: none; }
-        .success { background: #1e8e3e; color: white; }
-        .error { background: #d93025; color: white; }
-        .info-box { background: #2d2d2d; padding: 15px; border-radius: 6px; margin-top: 20px; font-size: 13px; color: #9aa0a6; line-height: 1.6; }
-        .warning-box { background: #3b2f1e; border: 1px solid #ff9800; padding: 15px; border-radius: 6px; margin-top: 20px; font-size: 13px; color: #ffcc80; line-height: 1.6; }
-    </style>
-</head>
-<body>
-    <div class="container">
-        <div class="header">
-            <h1 data-i18n="title">🤖 Gemini Proxy Control Panel</h1>
-            <select id="langSelector">
-                <option value="ar">🇸🇦 العربية</option>
-                <option value="en">🇬🇧 English</option>
-                <option value="es">🇪🇸 Español</option>
-            </select>
-        </div>
-        <form id="configForm">
-            <div class="form-group">
-                <label data-i18n="model_name">Model Name</label>
-                <input type="text" id="MODEL" placeholder="gemini-2.5-flash">
-            </div>
-            <div style="display: flex; gap: 15px;">
-                <div class="form-group" style="flex: 1;">
-                    <label data-i18n="temperature">Temperature</label>
-                    <input type="number" step="0.01" id="TEMPERATURE">
-                </div>
-                <div class="form-group" style="flex: 1;">
-                    <label data-i18n="max_tokens">Max Tokens</label>
-                    <input type="number" id="MAX_TOKENS">
-                </div>
-            </div>
-
-            <div class="switch-group" style="background: #3b1e1e; border: 1px solid #d93025;">
-                <span data-i18n="classic_mode">🔴 Use Classic Mode</span>
-                <label class="switch"><input type="checkbox" id="USE_CLASSIC_MODE"><span class="slider"></span></label>
-            </div>
-            <div class="form-group">
-                <label data-i18n="system_instruction">System Instruction</label>
-                <textarea id="SYSTEM_INSTRUCTION"></textarea>
-            </div>
-            <div class="switch-group">
-                <span data-i18n="nsfw">Enable NSFW</span>
-                <label class="switch"><input type="checkbox" id="ENABLE_NSFW"><span class="slider"></span></label>
-            </div>
-            <div class="switch-group">
-                <span data-i18n="thinking">Enable Thinking</span>
-                <label class="switch"><input type="checkbox" id="ENABLE_THINKING"><span class="slider"></span></label>
-            </div>
-            <div class="switch-group">
-                <span data-i18n="google_search">Enable Google Search</span>
-                <label class="switch"><input type="checkbox" id="ENABLE_GOOGLE_SEARCH"><span class="slider"></span></label>
-            </div>
-            <button type="submit" class="btn btn-save" data-i18n="save">Save Settings</button>
-        </form>
-        <div id="statusMsg" class="status"></div>
-        <div style="display: flex; justify-content: space-between; margin-top: 20px;">
-            <a href="/download/logs" class="btn btn-log" data-i18n="download_logs">📥 Download Logs</a>
-            <button class="btn btn-clear" onclick="clearLogs()" data-i18n="clear_logs">🗑️ Clear Logs</button>
-        </div>
-        <div class="warning-box" data-i18n="warning_classic">Classic Mode Warning.</div>
-        <div class="info-box">
-            <p data-i18n="note_env">Note: Changes here are temporary.</p>
-            <p data-i18n="note_url">JanitorAI URL: ends with /v1/chat/completions</p>
-        </div>
-    </div>
-    <script>
-        let translations = {};
-        // Auto-detect browser language (ar, en, es) or fallback to en
-        let currentLang = localStorage.getItem('lang') || (navigator.language || 'en').split('-')[0];
-        if (!['ar', 'en', 'es'].includes(currentLang)) currentLang = 'en';
-
-        async function loadTranslations() {
-            const res = await fetch('/translations.json');
-            translations = await res.json();
-            document.getElementById('langSelector').value = currentLang;
-            applyTranslations();
-        }
-
-        function applyTranslations() {
-            const dict = translations[currentLang];
-            if (!dict) return;
-            document.querySelectorAll('[data-i18n]').forEach(el => {
-                const key = el.getAttribute('data-i18n');
-                if (dict[key]) el.innerText = dict[key];
-            });
-            document.documentElement.lang = currentLang;
-            document.documentElement.dir = currentLang === 'ar' ? 'rtl' : 'ltr';
-        }
-
-        document.getElementById('langSelector').addEventListener('change', (e) => {
-            currentLang = e.target.value;
-            localStorage.setItem('lang', currentLang);
-            applyTranslations();
-        });
-
-        async function loadSettings() {
-            const res = await fetch('/api/settings');
-            const data = await res.json();
-            document.getElementById('MODEL').value = data.MODEL;
-            document.getElementById('TEMPERATURE').value = data.TEMPERATURE;
-            document.getElementById('MAX_TOKENS').value = data.MAX_TOKENS;
-            document.getElementById('SYSTEM_INSTRUCTION').value = data.SYSTEM_INSTRUCTION;
-            document.getElementById('ENABLE_NSFW').checked = data.ENABLE_NSFW;
-            document.getElementById('ENABLE_THINKING').checked = data.ENABLE_THINKING;
-            document.getElementById('ENABLE_GOOGLE_SEARCH').checked = data.ENABLE_GOOGLE_SEARCH;
-            document.getElementById('USE_CLASSIC_MODE').checked = data.USE_CLASSIC_MODE;
-        }
-
-        document.getElementById('configForm').addEventListener('submit', async (e) => {
-            e.preventDefault();
-            const payload = {
-                MODEL: document.getElementById('MODEL').value,
-                TEMPERATURE: parseFloat(document.getElementById('TEMPERATURE').value),
-                MAX_TOKENS: parseInt(document.getElementById('MAX_TOKENS').value),
-                SYSTEM_INSTRUCTION: document.getElementById('SYSTEM_INSTRUCTION').value,
-                ENABLE_NSFW: document.getElementById('ENABLE_NSFW').checked,
-                ENABLE_THINKING: document.getElementById('ENABLE_THINKING').checked,
-                ENABLE_GOOGLE_SEARCH: document.getElementById('ENABLE_GOOGLE_SEARCH').checked,
-                USE_CLASSIC_MODE: document.getElementById('USE_CLASSIC_MODE').checked
-            };
-            const res = await fetch('/api/settings', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
-            const statusMsg = document.getElementById('statusMsg');
-            const dict = translations[currentLang];
-            if(res.ok) { statusMsg.textContent = dict.success_msg; statusMsg.className = "status success"; }
-            else { statusMsg.textContent = dict.error_msg; statusMsg.className = "status error"; }
-            statusMsg.style.display = 'block';
-            setTimeout(() => statusMsg.style.display = 'none', 3000);
-        });
-
-        async function clearLogs() {
-            const dict = translations[currentLang];
-            if(confirm(dict.confirm_clear)) {
-                await fetch('/clear/logs', { method: 'POST' });
-                alert(dict.alert_cleared);
-            }
-        }
-
-        loadTranslations();
-        loadSettings();
-    </script>
-</body>
-</html>
-"""
-
-# ===================================================================
 #  Routes
 # ===================================================================
 
 @app.route('/translations.json')
 def get_translations():
-    try:
-        return send_file('translations.json', mimetype='application/json')
-    except FileNotFoundError:
-        return jsonify({})
+    try: return send_file('translations.json', mimetype='application/json')
+    except FileNotFoundError: return jsonify({})
 
 @app.route('/api/settings', methods=['GET', 'POST'])
 def api_settings():
@@ -360,10 +171,8 @@ def api_settings():
     if request.method == 'GET': return jsonify(app_config)
     elif request.method == 'POST':
         try:
-            new_config = request.json
-            app_config.update(new_config)
-            app_config["TEMPERATURE"] = float(app_config["TEMPERATURE"])
-            app_config["MAX_TOKENS"] = int(app_config["MAX_TOKENS"])
+            new_config = request.json; app_config.update(new_config)
+            app_config["TEMPERATURE"] = float(app_config["TEMPERATURE"]); app_config["MAX_TOKENS"] = int(app_config["MAX_TOKENS"])
             return jsonify({"status": "success", "message": "Settings updated"}), 200
         except Exception as e: return jsonify({"status": "error", "message": str(e)}), 400
 
@@ -382,22 +191,18 @@ def clear_logs():
 @app.route('/', methods=["GET", "POST", "OPTIONS"])
 @app.route('/v1/chat/completions', methods=["GET", "POST", "OPTIONS"])
 def handle_proxy():
-    if request.method == "GET": return HTML_UI
+    if request.method == "GET": return render_template('index.html')
     if request.method == "OPTIONS": return jsonify({"status": "ok"}), 200
 
     request_time = time.strftime("%Y-%m-%d %H:%M:%S")
     print(f"\n[{request_time}] Received request")
 
     try:
-        json_data = request.json or {}
-        is_streaming = json_data.get('stream', False)
-
-        api_key = None
-        auth_header = request.headers.get('authorization')
+        json_data = request.json or {}; is_streaming = json_data.get('stream', False)
+        api_key = None; auth_header = request.headers.get('authorization')
         if auth_header and auth_header.startswith('Bearer '): api_key = auth_header.split(' ')[1]
         elif request.headers.get('x-api-key'): api_key = request.headers.get('x-api-key')
         elif json_data.get('api_key'): api_key = json_data.get('api_key')
-
         if not api_key: return jsonify(create_error_response("Google AI API key required.")), 401
 
         current_model = app_config["MODEL"]; current_temp = app_config["TEMPERATURE"]; current_max_tokens = app_config["MAX_TOKENS"]
@@ -410,14 +215,12 @@ def handle_proxy():
             if current_nsfw and nsfw_prefill:
                 if messages and messages[-1].get("role") == "user":
                     messages.append({"content": nsfw_prefill, "role": "system"})
-                    if current_thinking:
-                        messages.append({"content": thinking_prompt, "role": "system"}); messages.append({"content": reminder, "role": "system"})
+                    if current_thinking: messages.append({"content": thinking_prompt, "role": "system"}); messages.append({"content": reminder, "role": "system"})
                     messages.append({"content": get_custom_assistant_prompt(), "role": "assistant"})
                 elif messages and messages[-1].get("role") == "assistant":
                     existing_content = messages[-1].get("content", ""); last_assistant = messages.pop()
                     messages.append({"content": nsfw_prefill, "role": "system"})
-                    if current_thinking:
-                        messages.append({"content": thinking_prompt, "role": "system"}); messages.append({"content": reminder, "role": "system"})
+                    if current_thinking: messages.append({"content": thinking_prompt, "role": "system"}); messages.append({"content": reminder, "role": "system"})
                     if existing_content.strip() and existing_content.strip() != nsfw_prefill.strip(): messages.append(last_assistant)
                     messages.append({"content": get_custom_assistant_prompt(), "role": "assistant"})
             json_data["messages"] = messages
@@ -439,7 +242,6 @@ def handle_proxy():
 
         selected_model = json_data.get('model') if json_data.get('model') and json_data['model'] != "custom" else current_model
         if current_search: google_ai_request["tools"] = [{"google_search": {}}]
-
         endpoint = "streamGenerateContent" if is_streaming else "generateContent"
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{selected_model}:{endpoint}?key={api_key}"
         if is_streaming: url += "&alt=sse"
@@ -453,9 +255,7 @@ def handle_proxy():
                 response = None; parser = StreamingParser(); raw_google_text = ""; final_sent_text = ""
                 try:
                     response = requests.post(url, json=google_ai_request, headers=headers, stream=True, timeout=timeout_seconds)
-                    response.raise_for_status()
-                    has_sent_data = False; last_chunk_time = time.time(); block_reason_detected = False
-
+                    response.raise_for_status(); has_sent_data = False; last_chunk_time = time.time(); block_reason_detected = False
                     for chunk in response.iter_lines():
                         if chunk:
                             chunk_str = chunk.decode('utf-8')
@@ -488,16 +288,12 @@ def handle_proxy():
                             except json.JSONDecodeError: continue
                         if time.time() - last_chunk_time > timeout_seconds:
                             log_data += "--- TIMEOUT ---\n"; yield create_error_stream_chunk("Stream timed out"); yield 'data: [DONE]\n\n'; break
-
                     if not has_sent_data and not block_reason_detected:
                         if parser.all_content.strip():
                             cleaned_content = parser.all_content.replace('<think>', '').replace('</think>', '').replace('<response>', '').replace('</response>', '').strip()
-                            if cleaned_content:
-                                final_sent_text = cleaned_content; has_sent_data = True
-                                yield create_janitor_chunk(cleaned_content, selected_model, None)
+                            if cleaned_content: final_sent_text = cleaned_content; has_sent_data = True; yield create_janitor_chunk(cleaned_content, selected_model, None)
                         if not has_sent_data:
-                            log_data += "--- NO CONTENT RECEIVED ---\n"
-                            yield create_error_stream_chunk("No content received from Google AI.")
+                            log_data += "--- NO CONTENT RECEIVED ---\n"; yield create_error_stream_chunk("No content received from Google AI.")
                         yield 'data: [DONE]\n\n'
                 except Exception as e:
                     log_data += "--- STREAMING EXCEPTION ---\n" + str(e) + "\n"
@@ -507,7 +303,6 @@ def handle_proxy():
                     log_data += "--- RAW GOOGLE RESPONSE ---\n" + raw_google_text + "\n"
                     log_data += "--- FINAL TEXT SENT TO JANITOR ---\n" + final_sent_text + "\n"
                     write_log(log_data)
-
             return Response(stream_with_context(generate_stream()), content_type='text/event-stream', headers={'Cache-Control': 'no-cache', 'Connection': 'keep-alive', 'X-Accel-Buffering': 'no'})
         else:
             response = requests.post(url, json=google_ai_request, headers=headers, timeout=timeout_seconds)
