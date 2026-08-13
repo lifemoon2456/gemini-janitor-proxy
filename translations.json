@@ -1,6 +1,9 @@
 {
   "ar": {
     "title": "🤖 لوحة تحكم Gemini Proxy",
+    "proxy_url_title": "🔗 رابط JanitorAI الخاص بك (انسخه والصقه هنا)",
+    "copy_btn": "نسخ",
+    "copied_btn": "تم النسخ! ✅",
     "model_name": "🏷️ اسم النموذج الافتراضي",
     "model_name_note": "⚠️ ملاحظة: اسم النموذج المكتوب في JanitorAI له الأولوية ويتجاوز هذا الاسم.",
     "temperature": "🌡️ درجة الحرارة (الإبداع)",
@@ -15,7 +18,6 @@
     "clear_logs": "🗑️ مسح السجلات",
     "warning_classic": "تنبيه بخصوص الوضع الكلاسيكي: إذا قمت بتشغيله، سيتجاهل النظام مربع التعليمات بالأعلى وسيستخدم طريقة الحقن القديمة.",
     "note_env": "ملاحظة: التعديلات هنا تُحفظ في ذاكرة السيرفر المؤقتة. إذا قامت Render بإعادة تشغيل السيرفر، ستعود الإعدادات لقيمها الافتراضية.",
-    "note_url": "رابط JanitorAI: استخدم نفس الرابط الذي ينتهي بـ /v1/chat/completions",
     "success_msg": "✅ تم حفظ الإعدادات بنجاح!",
     "error_msg": "❌ حدث خطأ أثناء الحفظ.",
     "confirm_clear": "هل أنت متأكد من مسح جميع السجلات؟",
@@ -23,6 +25,9 @@
   },
   "en": {
     "title": "🤖 Gemini Proxy Control Panel",
+    "proxy_url_title": "🔗 Your JanitorAI URL (Paste this)",
+    "copy_btn": "Copy",
+    "copied_btn": "Copied! ✅",
     "model_name": "🏷️ Default Model Name",
     "model_name_note": "⚠️ Note: The model name set in JanitorAI takes precedence and overrides this.",
     "temperature": "🌡️ Temperature (Creativity)",
@@ -37,7 +42,6 @@
     "clear_logs": "🗑️ Clear Logs",
     "warning_classic": "Classic Mode Warning: If enabled, the system ignores the instruction box above and uses the old injection method.",
     "note_env": "Note: Changes here are saved in temporary server memory. If Render restarts the server, settings revert to defaults.",
-    "note_url": "JanitorAI URL: Use the same URL ending with /v1/chat/completions",
     "success_msg": "✅ Settings saved successfully!",
     "error_msg": "❌ An error occurred while saving.",
     "confirm_clear": "Are you sure you want to clear all logs?",
@@ -45,6 +49,9 @@
   },
   "es": {
     "title": "🤖 Panel de Control de Gemini Proxy",
+    "proxy_url_title": "🔗 Tu URL de JanitorAI (Pega esto)",
+    "copy_btn": "Copiar",
+    "copied_btn": "¡Copiado! ✅",
     "model_name": "🏷️ Nombre del Modelo Predeterminado",
     "model_name_note": "⚠️ Nota: El nombre del modelo en JanitorAI tiene prioridad y anula este.",
     "temperature": "🌡️ Temperatura (Creatividad)",
@@ -59,7 +66,6 @@
     "clear_logs": "🗑️ Borrar Registros",
     "warning_classic": "Advertencia Modo Clásico: Si está activado, el sistema ignora el cuadro de instrucciones y usa el método de inyección antiguo.",
     "note_env": "Nota: Los cambios aquí se guardan en la memoria temporal. Si Render reinicia, vuelven a los valores predeterminados.",
-    "note_url": "URL de JanitorAI: Usa la misma URL que termina con /v1/chat/completions",
     "success_msg": "✅ ¡Ajustes guardados con éxito!",
     "error_msg": "❌ Ocurrió un error al guardar.",
     "confirm_clear": "¿Estás seguro de borrar todos los registros?",
