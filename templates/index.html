@@ -24,7 +24,8 @@
         input[type="text"], input[type="number"], textarea, select.field-select { width: 100%; padding: 10px; background: #2d2d2d; border: 1px solid #444; border-radius: 6px; color: #e0e0e0; box-sizing: border-box; }
         textarea { font-family: 'Courier New', Courier, monospace; min-height: 150px; resize: vertical; line-height: 1.4; }
         .note-text { display: block; margin-top: 6px; color: #ffcc80; font-size: 12px; font-weight: normal; }
-        .switch-group { display: flex; justify-content: space-between; align-items: center; background: #2d2d2d; padding: 12px 15px; border-radius: 6px; margin-bottom: 15px; }
+        .switch-group { display: flex; justify-content: space-between; align-items: center; background: #2d2d2d; padding: 12px 15px; border-radius: 6px; margin-bottom: 15px; transition: all 0.3s ease; }
+        .disabled-group { opacity: 0.4; pointer-events: none; background: #1a1a1a; }
         .switch { position: relative; display: inline-block; width: 50px; height: 26px; }
         .switch input { opacity: 0; width: 0; height: 0; }
         .slider { position: absolute; cursor: pointer; top: 0; left: 0; right: 0; bottom: 0; background-color: #555; transition: .3s; border-radius: 26px; }
@@ -88,7 +89,7 @@
 
             <div class="form-group">
                 <label data-i18n="thinking_level">⚙️ Native Thinking Level (Gemini 3.5+)</label>
-                <select id="THINKING_LEVEL" class="field-select">
+                <select id="THINKING_LEVEL" class="field-select" onchange="updateThinkingUI()">
                     <option value="" data-i18n="think_off">Off (Use Proxy Prompting)</option>
                     <option value="minimal">Minimal</option>
                     <option value="low">Low</option>
@@ -109,10 +110,14 @@
                 <span data-i18n="nsfw">Enable NSFW</span>
                 <label class="switch"><input type="checkbox" id="ENABLE_NSFW"><span class="slider"></span></label>
             </div>
-            <div class="switch-group">
-                <span data-i18n="thinking">Enable Thinking (Proxy Tags)</span>
+            
+            <!-- Proxy Thinking Group with Auto-Disable -->
+            <div id="proxy-thinking-group" class="switch-group">
+                <span data-i18n="thinking">🧠 Enable Thinking (Proxy Tags)</span>
                 <label class="switch"><input type="checkbox" id="ENABLE_THINKING"><span class="slider"></span></label>
             </div>
+            <small class="note-text" id="thinking-conflict-note" style="display:none;" data-i18n="thinking_conflict_note">⚠️ Disabled: Native Thinking Level is active. Using both causes conflicts.</small>
+
             <div class="switch-group">
                 <span data-i18n="google_search">Enable Google Search</span>
                 <label class="switch"><input type="checkbox" id="ENABLE_GOOGLE_SEARCH"><span class="slider"></span></label>
@@ -158,6 +163,22 @@
             applyTranslations();
         });
 
+        function updateThinkingUI() {
+            const nativeLevel = document.getElementById('THINKING_LEVEL').value;
+            const proxyThinking = document.getElementById('ENABLE_THINKING');
+            const proxyGroup = document.getElementById('proxy-thinking-group');
+            const conflictNote = document.getElementById('thinking-conflict-note');
+
+            if (nativeLevel !== "") {
+                proxyThinking.checked = false;
+                proxyGroup.classList.add('disabled-group');
+                conflictNote.style.display = 'block';
+            } else {
+                proxyGroup.classList.remove('disabled-group');
+                conflictNote.style.display = 'none';
+            }
+        }
+
         async function loadSettings() {
             const currentDomain = window.location.origin;
             document.getElementById('proxyUrl').value = currentDomain + '/v1/chat/completions';
@@ -173,6 +194,9 @@
             document.getElementById('ENABLE_THINKING').checked = data.ENABLE_THINKING;
             document.getElementById('ENABLE_GOOGLE_SEARCH').checked = data.ENABLE_GOOGLE_SEARCH;
             document.getElementById('USE_CLASSIC_MODE').checked = data.USE_CLASSIC_MODE;
+            
+            // Apply UI logic on load
+            updateThinkingUI();
         }
 
         document.getElementById('configForm').addEventListener('submit', async (e) => {
