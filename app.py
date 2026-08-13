@@ -68,6 +68,7 @@ app_config = {
     "ENABLE_THINKING": os.environ.get("ENABLE_THINKING", "true").lower() == "true",
     "ENABLE_GOOGLE_SEARCH": os.environ.get("ENABLE_GOOGLE_SEARCH", "false").lower() == "true",
     "USE_CLASSIC_MODE": os.environ.get("USE_CLASSIC_MODE", "false").lower() == "true",
+    "THINKING_LEVEL": os.environ.get("THINKING_LEVEL", ""),
     "SYSTEM_INSTRUCTION": os.environ.get("SYSTEM_INSTRUCTION", DEFAULT_SYSTEM_INSTRUCTION)
 }
 PORT = int(os.environ.get("PORT", 5000))
@@ -208,6 +209,8 @@ def handle_proxy():
         current_model = app_config["MODEL"]; current_temp = app_config["TEMPERATURE"]; current_max_tokens = app_config["MAX_TOKENS"]
         current_nsfw = app_config["ENABLE_NSFW"]; current_thinking = app_config["ENABLE_THINKING"]; current_search = app_config["ENABLE_GOOGLE_SEARCH"]
         use_classic = app_config["USE_CLASSIC_MODE"]; current_system_instruction = app_config["SYSTEM_INSTRUCTION"]
+        current_thinking_level = app_config.get("THINKING_LEVEL", "")
+        
         messages = json_data.get("messages", [])
 
         if use_classic:
@@ -237,7 +240,22 @@ def handle_proxy():
                 else: messages.append({"role": "user", "content": thinking_forcing_prompt})
                 json_data["messages"] = messages
             google_ai_contents = transform_janitor_to_google_ai(messages, allow_model_end=False)
-            google_ai_request = {"contents": google_ai_contents, "safetySettings": get_safety_settings(current_model), "generationConfig": {"temperature": json_data.get('temperature', current_temp), "maxOutputTokens": json_data.get('max_tokens', current_max_tokens), "topP": 0.95, "topK": 40}}
+            
+            gen_config = {"temperature": json_data.get('temperature', current_temp), "maxOutputTokens": json_data.get('max_tokens', current_max_tokens), "topP": 0.95, "topK": 40}
+            
+            if current_thinking_level:
+                # جوجل تتطلب وضع مستوى التفكير داخل حقل thinkingConfig في واجهة REST API
+                level_map = {
+                    "minimal": "MINIMAL",
+                    "low": "LOW",
+                    "medium": "MEDIUM",
+                    "high": "HIGH"
+                }
+                gen_config["thinkingConfig"] = {
+                    "thinkingLevel": level_map.get(current_thinking_level, "MEDIUM")
+                }
+                
+            google_ai_request = {"contents": google_ai_contents, "safetySettings": get_safety_settings(current_model), "generationConfig": gen_config}
             if current_system_instruction and current_system_instruction.strip(): google_ai_request["systemInstruction"] = {"parts": [{"text": current_system_instruction}]}
 
         selected_model = json_data.get('model') if json_data.get('model') and json_data['model'] != "custom" else current_model
@@ -247,7 +265,7 @@ def handle_proxy():
         if is_streaming: url += "&alt=sse"
         headers = {'Content-Type': 'application/json'}; timeout_seconds = 300
 
-        log_data = f"[{request_time}] Model: {selected_model} | Mode: {'Classic' if use_classic else 'Safe'}\n"
+        log_data = f"[{request_time}] Model: {selected_model} | Mode: {'Classic' if use_classic else 'Safe'} | ThinkingLevel: {current_thinking_level}\n"
         log_data += "--- PROMPT SENT TO GOOGLE ---\n" + json.dumps(google_ai_request, indent=2, ensure_ascii=False)[:3000] + "\n"
 
         if is_streaming:
