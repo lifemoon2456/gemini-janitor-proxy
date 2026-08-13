@@ -244,7 +244,7 @@ def handle_proxy():
             gen_config = {"temperature": json_data.get('temperature', current_temp), "maxOutputTokens": json_data.get('max_tokens', current_max_tokens), "topP": 0.95, "topK": 40}
             
             if current_thinking_level:
-                gen_config["thinkingLevel"] = current_thinking_level
+                gen_config["thinking_level"] = current_thinking_level
                 
             google_ai_request = {"contents": google_ai_contents, "safetySettings": get_safety_settings(current_model), "generationConfig": gen_config}
             if current_system_instruction and current_system_instruction.strip(): google_ai_request["systemInstruction"] = {"parts": [{"text": current_system_instruction}]}
