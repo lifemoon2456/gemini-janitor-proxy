@@ -11,6 +11,14 @@
         h1 { color: #4285f4; margin: 0; font-size: 24px; display: flex; align-items: center; gap: 10px; }
         .logo-svg { width: 32px; height: 32px; }
         select { padding: 8px; background: #2d2d2d; border: 1px solid #444; border-radius: 6px; color: #e0e0e0; cursor: pointer; }
+        
+        .url-box { background: #1e3a2e; border: 1px solid #1e8e3e; padding: 15px; border-radius: 8px; margin-bottom: 25px; }
+        .url-box label { color: #8eff9a; margin-bottom: 10px; }
+        .url-input-group { display: flex; gap: 10px; }
+        #proxyUrl { flex: 1; background: #121212; border: 1px solid #333; border-radius: 6px; padding: 10px; color: #4285f4; font-weight: bold; font-size: 14px; outline: none; }
+        .btn-copy { width: auto; margin: 0; background: #1e8e3e; color: white; padding: 10px 20px; border: none; border-radius: 6px; cursor: pointer; font-weight: bold; }
+        .btn-copy:hover { background: #166534; }
+
         .form-group { margin-bottom: 20px; }
         label { display: block; margin-bottom: 8px; color: #bdc1c6; font-weight: bold; font-size: 14px; }
         input[type="text"], input[type="number"], textarea { width: 100%; padding: 10px; background: #2d2d2d; border: 1px solid #444; border-radius: 6px; color: #e0e0e0; box-sizing: border-box; }
@@ -52,6 +60,15 @@
                 <option value="es">🇪🇸 Español</option>
             </select>
         </div>
+
+        <div class="url-box">
+            <label data-i18n="proxy_url_title">🔗 Your JanitorAI URL (Paste this)</label>
+            <div class="url-input-group">
+                <input type="text" id="proxyUrl" readonly>
+                <button type="button" class="btn-copy" onclick="copyUrl()" data-i18n="copy_btn">Copy</button>
+            </div>
+        </div>
+
         <form id="configForm">
             <div class="form-group">
                 <label data-i18n="model_name">Model Name</label>
@@ -99,7 +116,6 @@
         <div class="warning-box" data-i18n="warning_classic">Classic Mode Warning.</div>
         <div class="info-box">
             <p data-i18n="note_env">Note: Changes here are temporary.</p>
-            <p data-i18n="note_url">JanitorAI URL: ends with /v1/chat/completions</p>
         </div>
     </div>
     <script>
@@ -132,6 +148,10 @@
         });
 
         async function loadSettings() {
+            // Set Proxy URL automatically
+            const currentDomain = window.location.origin;
+            document.getElementById('proxyUrl').value = currentDomain + '/v1/chat/completions';
+
             const res = await fetch('/api/settings');
             const data = await res.json();
             document.getElementById('MODEL').value = data.MODEL;
@@ -164,6 +184,19 @@
             statusMsg.style.display = 'block';
             setTimeout(() => statusMsg.style.display = 'none', 3000);
         });
+
+        function copyUrl() {
+            const copyText = document.getElementById('proxyUrl');
+            copyText.select();
+            copyText.setSelectionRange(0, 99999);
+            navigator.clipboard.writeText(copyText.value).then(() => {
+                const btn = document.querySelector('.btn-copy');
+                const dict = translations[currentLang];
+                const originalText = dict.copy_btn;
+                btn.innerText = dict.copied_btn;
+                setTimeout(() => { btn.innerText = originalText; }, 2000);
+            });
+        }
 
         async function clearLogs() {
             const dict = translations[currentLang];
