@@ -38,7 +38,12 @@ nsfw_prefill = r'''<interaction-config>
 
 thinking_prompt = """You should structure your response using thinking tags:
 
-
+<think>
+[Your internal analysis here]
+[Plan your roleplay response]
+[Consider character motivations]
+[Any reasoning or thoughts]
+</think>
 <response>
 [Your actual roleplay content goes here]
 
@@ -47,16 +52,91 @@ This format helps separate your reasoning from the actual roleplay content."""
 reminder = "Remember to use <think>...</think> for your reasoning and <response>... for your roleplay content."
 
 def get_custom_assistant_prompt():
-    return """Alright, let's start with the thinking. I'll close it once I'm done. ' in self.buffer:
+    return """Alright, let's start with the thinking. I'll close it once I'm done. <think>"""
+
+DEFAULT_SYSTEM_INSTRUCTION = nsfw_prefill + "\n\n" + thinking_prompt
+
+# ===================================================================
+#  Configuration & Logging
+# ===================================================================
+
+app_config = {
+    "MODEL": os.environ.get("MODEL", "gemini-2.5-flash"),
+    "TEMPERATURE": float(os.environ.get("TEMPERATURE", "1.05")),
+    "MAX_TOKENS": int(os.environ.get("MAX_TOKENS", "10000")),
+    "ENABLE_NSFW": os.environ.get("ENABLE_NSFW", "true").lower() == "true",
+    "ENABLE_THINKING": os.environ.get("ENABLE_THINKING", "true").lower() == "true",
+    "ENABLE_GOOGLE_SEARCH": os.environ.get("ENABLE_GOOGLE_SEARCH", "false").lower() == "true",
+    "USE_CLASSIC_MODE": os.environ.get("USE_CLASSIC_MODE", "false").lower() == "true",
+    "THINKING_LEVEL": os.environ.get("THINKING_LEVEL", ""),
+    "SYSTEM_INSTRUCTION": os.environ.get("SYSTEM_INSTRUCTION", DEFAULT_SYSTEM_INSTRUCTION)
+}
+PORT = int(os.environ.get("PORT", 5000))
+LOG_FILE = "proxy_logs.txt"
+log_lock = threading.Lock()
+
+def write_log(content):
+    try:
+        with log_lock:
+            if os.path.exists(LOG_FILE) and os.path.getsize(LOG_FILE) > 5 * 1024 * 1024: os.remove(LOG_FILE)
+            with open(LOG_FILE, "a", encoding="utf-8") as f: f.write(content + "\n\n" + "="*80 + "\n\n")
+    except Exception as e: print(f"Failed to write log: {e}")
+
+app = Flask(__name__)
+CORS(app)
+
+# ===================================================================
+#  Helper Functions
+# ===================================================================
+
+def create_error_response(error_message):
+    clean_message = json.dumps(str(error_message).replace("Error: ", "", 1) if str(error_message).startswith("Error: ") else str(error_message))[1:-1]
+    return {"choices": [{"message": {"content": clean_message}, "finish_reason": "error"}]}
+
+def create_error_stream_chunk(error_message):
+    clean_message = json.dumps(str(error_message).replace("Error: ", "", 1) if str(error_message).startswith("Error: ") else str(error_message))[1:-1]
+    error_chunk = {"choices": [{"delta": {"content": clean_message}, "finish_reason": "error"}]}
+    return f'data: {json.dumps(error_chunk)}\n\n'
+
+def get_safety_settings(model_name):
+    if not model_name: return []
+    return [
+        {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
+        {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
+        {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
+        {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
+    ]
+
+def transform_janitor_to_google_ai(messages, allow_model_end=False):
+    if not messages or not isinstance(messages, list): return []
+    google_ai_contents = []; current_role = None
+    for msg in messages:
+        role = msg.get('role'); content = msg.get('content')
+        if not content: continue
+        mapped_role = "user" if role == 'user' else "model"
+        if mapped_role == current_role: google_ai_contents[-1]["parts"][0]["text"] += "\n\n" + content
+        else: google_ai_contents.append({"role": mapped_role, "parts": [{"text": content}]}); current_role = mapped_role
+    if not allow_model_end and google_ai_contents and google_ai_contents[-1]["role"] == "model": google_ai_contents.append({"role": "user", "parts": [{"text": "Continue."}]})
+    return google_ai_contents
+
+def create_janitor_chunk(content, model_name, finish_reason=None):
+    return {"id": f"chatcmpl-stream-{int(time.time())}", "object": "chat.completion.chunk", "created": int(time.time()), "model": model_name, "choices": [{"index": 0, "delta": {"content": content}, "finish_reason": finish_reason if finish_reason and finish_reason != "STOP" else None}]}
+
+class StreamingParser:
+    def __init__(self): self.reset()
+    def reset(self): self.state = "searching"; self.thinking_content = ""; self.response_content = ""; self.buffer = ""; self.all_content = ""
+    def process_chunk(self, chunk_content):
+        self.buffer += chunk_content; self.all_content += chunk_content; content_to_send = ""; thinking_log = ""
+        while True:
+            if self.state == "searching":
+                if '</think>' in self.buffer:
                     parts = self.buffer.split('</think>', 1); thinking_part = self.all_content[:self.all_content.find('</think>')]
                     if '<think>' in thinking_part: thinking_part = thinking_part.split('<think>', 1)[1]
-                    self.thinking_content = thinking_part.strip(); thinking_log = self.thinking_content
-                    self.buffer = parts[1]; self.state = "found_think_end"; continue
+                    self.thinking_content = thinking_part.strip(); thinking_log = self.thinking_content; self.buffer = parts[1]; self.state = "found_think_end"; continue
                 elif '<response>' in self.buffer:
                     parts = self.buffer.split('<response>', 1); thinking_part = self.all_content[:self.all_content.find('<response>')]
                     if '<think>' in thinking_part: thinking_part = thinking_part.split('<think>', 1)[1]
-                    self.thinking_content = thinking_part.strip(); thinking_log = self.thinking_content
-                    self.buffer = parts[1]; self.state = "in_response"; continue
+                    self.thinking_content = thinking_part.strip(); thinking_log = self.thinking_content; self.buffer = parts[1]; self.state = "in_response"; continue
                 else:
                     stripped_content = self.all_content.lstrip()
                     if stripped_content and not stripped_content.startswith('<think') and not stripped_content.startswith('<resp'):
@@ -129,7 +209,7 @@ def handle_proxy():
         current_model = app_config["MODEL"]; current_temp = app_config["TEMPERATURE"]; current_max_tokens = app_config["MAX_TOKENS"]
         current_nsfw = app_config["ENABLE_NSFW"]; current_thinking = app_config["ENABLE_THINKING"]; current_search = app_config["ENABLE_GOOGLE_SEARCH"]
         use_classic = app_config["USE_CLASSIC_MODE"]; current_system_instruction = app_config["SYSTEM_INSTRUCTION"]
-        current_thinking_level = app_config.get("THINKING_LEVEL", "") # New parameter
+        current_thinking_level = app_config.get("THINKING_LEVEL", "")
         
         messages = json_data.get("messages", [])
 
@@ -161,10 +241,8 @@ def handle_proxy():
                 json_data["messages"] = messages
             google_ai_contents = transform_janitor_to_google_ai(messages, allow_model_end=False)
             
-            # Base generation config
             gen_config = {"temperature": json_data.get('temperature', current_temp), "maxOutputTokens": json_data.get('max_tokens', current_max_tokens), "topP": 0.95, "topK": 40}
             
-            # Add Native Thinking Level if specified (for Gemini 3.5+)
             if current_thinking_level:
                 gen_config["thinkingLevel"] = current_thinking_level
                 
