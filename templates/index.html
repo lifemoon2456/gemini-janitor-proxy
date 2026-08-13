@@ -8,12 +8,14 @@
         body { background-color: #121212; color: #e0e0e0; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; margin: 0; padding: 20px; }
         .container { max-width: 800px; margin: auto; background: #1e1e1e; padding: 30px; border-radius: 12px; box-shadow: 0 4px 15px rgba(0,0,0,0.5); }
         .header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; }
-        h1 { color: #4285f4; margin: 0; font-size: 24px; }
+        h1 { color: #4285f4; margin: 0; font-size: 24px; display: flex; align-items: center; gap: 10px; }
+        .logo-svg { width: 32px; height: 32px; }
         select { padding: 8px; background: #2d2d2d; border: 1px solid #444; border-radius: 6px; color: #e0e0e0; cursor: pointer; }
         .form-group { margin-bottom: 20px; }
         label { display: block; margin-bottom: 8px; color: #bdc1c6; font-weight: bold; font-size: 14px; }
         input[type="text"], input[type="number"], textarea { width: 100%; padding: 10px; background: #2d2d2d; border: 1px solid #444; border-radius: 6px; color: #e0e0e0; box-sizing: border-box; }
         textarea { font-family: 'Courier New', Courier, monospace; min-height: 150px; resize: vertical; line-height: 1.4; }
+        .note-text { display: block; margin-top: 6px; color: #ffcc80; font-size: 12px; font-weight: normal; }
         .switch-group { display: flex; justify-content: space-between; align-items: center; background: #2d2d2d; padding: 12px 15px; border-radius: 6px; margin-bottom: 15px; }
         .switch { position: relative; display: inline-block; width: 50px; height: 26px; }
         .switch input { opacity: 0; width: 0; height: 0; }
@@ -36,7 +38,14 @@
 <body>
     <div class="container">
         <div class="header">
-            <h1 data-i18n="title">🤖 Gemini Proxy Control Panel</h1>
+            <h1>
+                <svg class="logo-svg" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                    <path d="M12 2L2 7L12 12L22 7L12 2Z" stroke="#4285f4" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+                    <path d="M2 17L12 22L22 17" stroke="#34a853" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+                    <path d="M2 12L12 17L22 12" stroke="#ea4335" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+                </svg>
+                <span data-i18n="title">Gemini Proxy Control Panel</span>
+            </h1>
             <select id="langSelector">
                 <option value="ar">🇸🇦 العربية</option>
                 <option value="en">🇬🇧 English</option>
@@ -47,6 +56,7 @@
             <div class="form-group">
                 <label data-i18n="model_name">Model Name</label>
                 <input type="text" id="MODEL" placeholder="gemini-2.5-flash">
+                <small class="note-text" data-i18n="model_name_note">⚠️ Note: The model name set in JanitorAI overrides this default.</small>
             </div>
             <div style="display: flex; gap: 15px;">
                 <div class="form-group" style="flex: 1;">
